@@ -96,7 +96,7 @@ def test_existing_access_is_confirmed_without_second_grant(system):
 
 @pytest.mark.parametrize("overrides", [
     {"employee_id": "unknown"}, {"employee_id": "UDEMO004"},
-    {"employee_id": "UDEMO002"}, {"access_level": "Write"},
+    {"employee_id": "UDEMO002"},
     {"employee_id": "UDEMO002", "access_level": "Write"},
     {"employee_id": "UDEMO011", "access_level": "Write"},
     {"application": "Notion", "access_level": "Standard"},
@@ -214,3 +214,149 @@ def test_unknown_request_cannot_provision(system):
     workflow, _, provider = system
     assert "not found" in workflow.process("REQ-invented").message
     assert provider.access_list() == []
+
+
+def test_write_pending_survives_reopen_without_provisioning(system, tmp_path, monkeypatch):
+    workflow, database, provider = system
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+    response = submit(workflow, access_level="Write")
+    reopened = Database(tmp_path / "workflow.db")
+    try:
+        request = reopened.get(response.request_id)
+        assert request.status == RequestStatus.PENDING_APPROVAL
+        assert request.assigned_approver_id == "UDEMO005"
+        assert reopened.policy_reference(request.request_id) == ("GH-WRITE-ENG", 1)
+        assert [e.event_type for e in reopened.events(request.request_id)] == ["REQUEST_SUBMITTED"]
+        assert Workflow(workflow.configuration, reopened, provider).process(request.request_id) == response
+    finally:
+        reopened.close()
+    assert "pending manager approval" in response.message
+    assert calls == []
+    assert provider.access_list() == []
+
+
+@pytest.mark.parametrize("reviewer", ["UDEMO002", "UDEMO001", "unknown", "UDEMO004"])
+def test_unauthorized_approval_preserves_pending(system, monkeypatch, reviewer):
+    workflow, database, provider = system
+    response = submit(workflow, access_level="Write")
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+    result = workflow.approve(response.request_id, reviewer)
+    assert "Approval rejected" in result.message
+    assert database.get(response.request_id).status == RequestStatus.PENDING_APPROVAL
+    events = database.events(response.request_id)
+    assert [e.event_type for e in events] == ["REQUEST_SUBMITTED", "APPROVAL_ATTEMPTED", "APPROVAL_REJECTED"]
+    assert all(e.actor == reviewer for e in events[1:])
+    assert calls == []
+    assert provider.access_list() == []
+
+
+def test_manager_approval_commits_revalidation_before_mock_grant(system, tmp_path, monkeypatch):
+    workflow, database, provider = system
+    response = submit(workflow, access_level="Write")
+    original = provider.grant
+    observations = []
+
+    def observe(request):
+        reader = Database(tmp_path / "workflow.db")
+        try:
+            events = reader.events(request.request_id)
+            observations.append([e.event_type for e in events])
+            assert reader.get(request.request_id).status == RequestStatus.PROVISIONING
+            assert events[2].actor == "UDEMO005"
+            assert events[2].timestamp <= events[3].timestamp <= events[4].timestamp
+        finally:
+            reader.close()
+        return original(request)
+
+    monkeypatch.setattr(provider, "grant", observe)
+    result = workflow.approve(response.request_id, "UDEMO005")
+    assert observations == [["REQUEST_SUBMITTED", "APPROVAL_ATTEMPTED", "REQUEST_APPROVED",
+                             "REVALIDATION_SUCCEEDED", "PROVISIONING_STARTED"]]
+    assert database.get(response.request_id).status == RequestStatus.ACTIVE
+    assert database.get(response.request_id).provisioning_result == GrantResult.GRANTED
+    assert provider.access_list() == [("UDEMO001", "GitHub", "Write")]
+    assert "GitHub Write access is granted" in result.message
+    assert database.events(response.request_id)[-1].event_type == "PROVISIONING_SUCCEEDED"
+    assert "Approval rejected" in workflow.approve(response.request_id, "UDEMO005").message
+    assert len(observations) == 1
+
+
+@pytest.mark.parametrize("change", ["inactive", "missing", "department", "manager", "policy"])
+@pytest.mark.parametrize("timing", ["pending", "after_approval"])
+def test_approval_revalidates_current_trusted_configuration(system, monkeypatch, change, timing):
+    workflow, database, provider = system
+    response = submit(workflow, access_level="Write")
+
+    def change_configuration():
+        config = workflow.configuration
+        if change == "policy":
+            config = replace(config, policies=tuple(replace(p, policy_version=2) for p in config.policies))
+        else:
+            employees = []
+            for employee in config.employees:
+                if employee.slack_user_id == "UDEMO001":
+                    if change == "missing":
+                        continue
+                    changes = {"inactive": {"status": EmployeeStatus.INACTIVE},
+                               "department": {"department": "Product"},
+                               "manager": {"manager_slack_id": "UDEMO006"}}
+                    employee = replace(employee, **changes[change])
+                employees.append(employee)
+            config = replace(config, employees=tuple(employees))
+        workflow.configuration = config
+
+    if timing == "pending":
+        change_configuration()
+    else:
+        original = database.transition
+
+        def transition_then_change(request, event):
+            original(request, event)
+            if event.event_type == "REQUEST_APPROVED":
+                change_configuration()
+
+        monkeypatch.setattr(database, "transition", transition_then_change)
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+    result = workflow.approve(response.request_id, "UDEMO005")
+    assert database.get(response.request_id).status == RequestStatus.REJECTED
+    assert [e.event_type for e in database.events(response.request_id)] == [
+        "REQUEST_SUBMITTED", "APPROVAL_ATTEMPTED", "REQUEST_APPROVED", "REVALIDATION_FAILED"]
+    assert "access is granted" not in result.message
+    assert calls == []
+    assert provider.access_list() == []
+
+
+@pytest.mark.parametrize("manager", [None, "unknown", "UDEMO001", "UDEMO004"])
+def test_unresolvable_manager_fails_closed(system, manager):
+    workflow, database, provider = system
+    workflow.configuration = replace(workflow.configuration, employees=tuple(
+        replace(e, manager_slack_id=manager) if e.slack_user_id == "UDEMO001" else e
+        for e in workflow.configuration.employees))
+    response = submit(workflow, access_level="Write")
+    assert response.request_id is None
+    assert "manager could not be resolved" in response.message
+    assert provider.access_list() == []
+
+
+@pytest.mark.parametrize("event_type", ["APPROVAL_ATTEMPTED", "REQUEST_APPROVED", "REVALIDATION_SUCCEEDED"])
+def test_approval_audit_failure_blocks_grant(system, monkeypatch, event_type):
+    workflow, database, provider = system
+    response = submit(workflow, access_level="Write")
+    original = database.append_event
+
+    def fail(event):
+        if event.event_type == event_type:
+            raise RuntimeError("private database error")
+        original(event)
+
+    monkeypatch.setattr(database, "append_event", fail)
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+    result = workflow.approve(response.request_id, "UDEMO005")
+    expected = RequestStatus.APPROVED if event_type == "REVALIDATION_SUCCEEDED" else RequestStatus.PENDING_APPROVAL
+    assert database.get(response.request_id).status == expected
+    assert calls == []
+    assert "private" not in result.message

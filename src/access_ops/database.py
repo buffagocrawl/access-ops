@@ -25,6 +25,11 @@ class Database:
                 timestamp TEXT NOT NULL, policy_version INTEGER, details TEXT NOT NULL
             );
         """)
+        # Preserve databases created by the preceding auto-approval slice.
+        columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(requests)")}
+        if "assigned_approver_id" not in columns:
+            self.connection.execute("ALTER TABLE requests ADD COLUMN assigned_approver_id TEXT")
+            self.connection.commit()
 
     def close(self):
         self.connection.close()
@@ -32,11 +37,11 @@ class Database:
     def create(self, request, policy, event):
         with self.connection:
             self.connection.execute(
-                "INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (request.request_id, request.requester_slack_id, request.application,
                  request.access_level, request.business_reason, request.created_at.isoformat(),
                  request.updated_at.isoformat(), request.status, request.provisioning_result,
-                 policy.policy_id, policy.policy_version),
+                 policy.policy_id, policy.policy_version, request.assigned_approver_id),
             )
             self.append_event(event)
 
@@ -53,6 +58,7 @@ class Database:
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
             status=RequestStatus(row["status"]), provisioning_result=row["provisioning_result"],
+            assigned_approver_id=row["assigned_approver_id"],
         )
 
     def policy_reference(self, request_id):
