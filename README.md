@@ -14,6 +14,8 @@ An agentic natural-language intake architecture is documented for comparison and
 
 The configuration and data-model layer uses the Python standard library: immutable typed records, validated CSV loading, exact employee lookup, and deterministic policy selection. Both original CSV files are preserved. The first end-to-end workflow now supports an active Engineering employee requesting permanent GitHub Read access under the configured `AUTO_APPROVE` policy, with SQLite request/audit state, a mocked Okta directory, and safe Slack-style feedback. A policy match alone does not authorize provisioning; the workflow enforces validation, revalidation, and the committed audit requirement.
 
+Engineering GitHub Write now uses one configured manager approval before provisioning, as described below.
+
 ### Planned behavior
 
 The implementation contract calls for a local vertical slice supporting:
@@ -71,7 +73,7 @@ access-ops/
 `config/access_policies.csv` contains the five-application catalog. The loader and matcher use the following conventions:
 
 - Match enabled rows by exact application/access level and trusted department/title. Semicolons separate allowed values; `*` means any value in that field. Department and title conditions both apply. `eligible_departments` identifies which employees a row applies to, including exception and rejection rows; it does not itself grant eligibility. There is no row-order precedence. Zero or multiple matches must authorize nothing and require IT review.
-- `AUTO_APPROVE` and `REJECT` use `approver_type=NONE` and a blank ID. `MANAGER` uses a blank ID because the one reviewer comes from the requester's `manager_slack_id`. `APPLICATION_OWNER` and `IT_SECURITY` each identify exactly one reviewer through `approver_id`. Reviewer availability and self-approval checks remain required future workflow controls.
+- `AUTO_APPROVE` and `REJECT` use `approver_type=NONE` and a blank ID. `MANAGER` uses a blank ID because the one reviewer comes from the requester's `manager_slack_id`. `APPLICATION_OWNER` and `IT_SECURITY` each identify exactly one reviewer through `approver_id`. The Engineering GitHub Write workflow checks manager availability and prohibits self-approval; other review paths remain deferred.
 - Booleans are `true`/`false`. `max_duration_days` caps temporary access only; permanent access requires `permanent_allowed=true`. Rejection rows allow neither and use a zero-day limit. Standard temporary access is capped at 30 days, GitHub exceptions and Admin at 7 days. A 90-day request is not authorized by these rows. Duration failures must not fall through to a more permissive rule.
 - `policy_version` starts at `1` and should increase when a row changes. `eligible_titles` preserves the Blueprint's explicit Engineering-leadership restriction on GitHub Admin; other rows use `*`, so titles do not otherwise imply trust.
 - Alice demonstrates Engineering GitHub Read auto-approval and Write manager approval. Paul and Sarah demonstrate temporary GitHub Write exception review directly by Grace. Mike demonstrates temporary GitHub Admin review by Ivan. Farah demonstrates an explicit GitHub Write rejection. Ian provides an inactive-employee negative case that must be blocked before policy evaluation.
@@ -90,7 +92,7 @@ Validation rules:
 - The catalog must contain all five applications. Access levels are limited to the existing demo catalog, including only GitHub Admin as the elevated example. Applications may have disabled rows; disabling rules never creates fallback permission.
 - Decisions and approver types must be recognized enum values. Boolean cells must be lowercase `true` or `false`. Policy versions must be positive integers and maximum durations nonnegative integers.
 - Department/title selectors must be distinct semicolon-separated values or `*` alone. Empty list entries and mixed wildcard lists fail. Department/title names are not restricted to current employees, allowing the existing Design and Customer Success rules.
-- Automatic and rejection decisions require `NONE` with no reviewer ID. Review decisions require a reviewer type. `MANAGER` leaves the ID blank; application-owner and IT/security rules require one active directory reviewer. Request-specific manager availability and self-approval checks are deferred.
+- Automatic and rejection decisions require `NONE` with no reviewer ID. Review decisions require a reviewer type. `MANAGER` leaves the ID blank; application-owner and IT/security rules require one active directory reviewer. The Engineering GitHub Write workflow enforces request-specific manager availability and self-approval checks.
 - Temporary access requires a positive duration limit; disabling temporary access requires zero. Rejection allows neither temporary nor permanent access. Other rules must allow at least one duration form. Admin requires IT/security approval and temporary-only access capped at seven days. Other duration limits remain CSV-driven.
 - Enabled rules with the same application/access cannot overlap in both department and title selectors, even if no current employee would match. Wildcards overlap every selector. Disabled rows still receive field and consistency validation, but do not participate in overlap detection. Errors identify the file and row or conflicting record IDs.
 
@@ -110,9 +112,9 @@ Reuse the existing `.venv`. If setting up a fresh checkout, create it with a Pyt
 
 `pytest.ini` makes `src/` importable during tests and collects tests from `tests/`; no package installation or activation is needed for these commands. SQLite (`sqlite3`) and CSV support use Python's standard library. Streamlit is deferred until the demo interface is built. All future business logic belongs in `src/access_ops/`, independently of Streamlit.
 
-There is no UI or application entry point yet; the golden path is callable through the Python service below. Human approval, exception review, reviewer authorization, denial workflows, temporary access, expiration, revocation, retries, broad duplicate-submission handling, failure-simulation controls, dashboards, and configuration editing remain deferred. Real integrations, external APIs, AI runtime behavior, Docker, and ORM are not implemented. The `.env.example` paths match the existing configuration, but environment-file loading is not implemented.
+There is no UI or application entry point yet; the golden path is callable through the Python service below. Exception review, denial workflows, temporary access, expiration, revocation, retries, broad duplicate-submission handling, failure-simulation controls, dashboards, and configuration editing remain deferred. Real integrations, external APIs, AI runtime behavior, Docker, and ORM are not implemented. The `.env.example` paths match the existing configuration, but environment-file loading is not implemented.
 
-Tests cover the existing configuration and policy engine plus the golden-path workflow, committed audit ordering, provider-confirmed activation, persistent idempotency, existing-access outcomes, invalid intake, revalidation, audit failures, and safe handling of unconfirmed provider results. Human approval, reviewer authorization, expiration, and revocation-failure workflows remain deferred; the full core prototype is not yet complete.
+Tests cover the existing configuration and policy engine plus the golden-path workflow, committed audit ordering, provider-confirmed activation, persistent idempotency, existing-access outcomes, invalid intake, revalidation, audit failures, and safe handling of unconfirmed provider results. Expiration and revocation-failure workflows remain deferred; the full core prototype is not yet complete.
 
 ### Calling the first vertical slice
 
@@ -145,7 +147,7 @@ finally:
 Order of operations:
 
 1. Look up the trusted employee and require active status; validate required fields and catalog values.
-2. Use the existing exact policy engine and require `AUTO_APPROVE`. Limit this phase to Engineering/GitHub/Read and policy-permitted `Permanent` duration.
+2. For the Read path below, use the existing exact policy engine and require `AUTO_APPROVE`. Both implemented paths require Engineering/GitHub and policy-permitted `Permanent` duration.
 3. Generate a UUID-based `REQ-...` ID and atomically persist `APPROVED` with `REQUEST_AUTO_APPROVED`. This event records the approval timestamp, policy ID, and version.
 4. Reload the stored request and revalidate against the service's current configuration; require the same policy ID/version.
 5. Commit `PROVISIONING_STARTED` and `PROVISIONING` together. Any audit/transaction error exits before the provider call.
@@ -157,6 +159,27 @@ Idempotency has two layers: processing an `ACTIVE` request returns the saved out
 Assumptions and limits: identity is supplied by trusted local demo code, configuration is a validated in-memory snapshot (reload explicitly to adopt CSV edits), and processing is sequential in one local workflow service. The local SQLite files are trusted application state, not an authentication boundary. Permanent access is the only supported duration because expiration is deferred. Approval and provisioning times are retained in audit history. The combined creation/auto-approval event keeps this slice small.
 
 Unconfirmed provider results use the existing `PROVISIONING_FAILED` state with a fixed safe audit description; no simulation controls or retries are added. If completion persistence fails after a provider grant, state remains `PROVISIONING` with the durable attempt event; the response asks IT to check access and does not claim completion. Reprocessing that state stops. Crash reconciliation, concurrent workers, and automatic recovery are deferred. Raw errors and business reasons are excluded from employee feedback and audit details.
+
+### Human approval (Phase 6, Step 12)
+
+Submit the same fields as above with `access_level="Write"`. The existing `GH-WRITE-ENG` policy requires manager approval. Alice's manager is already configured as Mike (`UDEMO005`); no CSV or model changes are needed.
+
+Submission persists `PENDING_APPROVAL`, the assigned manager, the policy reference, and `REQUEST_SUBMITTED`, then returns a Slack-style pending message. Calling `process` while pending grants nothing. Trusted local demo code supplies the reviewer identity:
+
+```python
+response = workflow.submit(
+    employee_id="UDEMO001", application="GitHub", access_level="Write",
+    business_reason="Contribute engineering changes", duration="Permanent",
+)
+print(response.message)
+print(workflow.approve(response.request_id, reviewer_id="UDEMO005").message)
+```
+
+`approve` audits the attempt and accepts only an active assigned reviewer on a pending request. Wrong reviewers, self-approval, and repeated approval are rejected without granting access. Successful approval atomically persists `APPROVED` and `REQUEST_APPROVED`, including the reviewer identity and timestamp. Processing then re-reads the requester from the service's current trusted configuration, repeats intake/policy validation, checks the saved policy ID/version, and verifies that the current manager matches the recorded approval. Failed revalidation records `REVALIDATION_FAILED` and `REJECTED`, retaining approval history and granting nothing. Successful revalidation is committed before the existing audited Mock Okta provisioning path. Access becomes `ACTIVE` only on provider confirmation.
+
+Configuration remains an immutable in-memory snapshot: trusted calling code must explicitly assign `workflow.configuration = load_configuration("config")` to adopt CSV changes before approval. CSV files are not watched automatically. Reviewer identity is mocked, not authenticated by this service. Processing remains sequential. Existing SQLite databases gain one nullable `assigned_approver_id` column on opening; existing requests are preserved.
+
+Tests cover pending persistence, no provisioning while pending, wrong/self reviewers, correct manager approval, approval audit ordering, revalidation both while pending and after approval, inactive/missing/ineligible requesters, changed policy/manager, unresolved reviewers, and audit failures. Only normal permanent Engineering GitHub Write approval is added. Exception review, denial actions, temporary access/expiration/revocation, broader invalid-input handling, failure injection, retries, and generalized idempotency remain later work.
 
 Do not commit credentials, tokens, passwords, API keys, or local `.env` files. The `.env` file is gitignored; use `.env.example` as the safe template.
 
