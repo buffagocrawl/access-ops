@@ -1,2 +1,2 @@
-# Dependencies will be added when implementation decisions require them.
-
+# Scaffold test dependency. SQLite and CSV support are in Python's standard library.
+pytest>=8,<9
