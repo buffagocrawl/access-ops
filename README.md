@@ -12,7 +12,7 @@ An agentic natural-language intake architecture is documented for comparison and
 
 ### Implemented behavior
 
-The configuration foundation contains synthetic employees and explicit access policies in `config/`. The Python package scaffold and pytest import checks are in place. Source modules contain documentation placeholders only; configuration loading/validation and all workflow behavior remain unimplemented. No access decisions are enforced yet.
+The configuration and data-model layer is implemented using the Python standard library: immutable typed employee, access-policy, access-request, and audit-event records; validated CSV loading; exact employee lookup; and deterministic policy selection. Both original CSV files are preserved. Other source modules remain placeholders. A selected policy describes the configured decision; it does not approve a request or grant access.
 
 ### Planned behavior
 
@@ -51,7 +51,9 @@ access-ops/
 │       ├── __init__.py
 │       └── mock_okta.py    Mock provider boundary
 ├── tests/
-│   └── test_imports.py     Scaffold imports only
+│   ├── test_imports.py     Scaffold imports
+│   ├── test_config.py      CSV loading and validation
+│   └── test_policy_engine.py Exact policy selection
 ├── AGENTS.md               Repository instructions
 ├── .env.example            Safe local configuration template
 ├── .gitignore              Local and generated-file exclusions
@@ -66,7 +68,7 @@ access-ops/
 
 `config/employees.csv` is the trusted synthetic directory. All names, Slack IDs, and `example.com` email addresses are demo data, not Customer.io employee information. Department, title, manager, and `active`/`inactive` status must come from this file, never requester input. Olivia is the top-level manager and has no manager herself; future requests needing an unavailable manager must stop safely for IT review.
 
-`config/access_policies.csv` contains the five-application catalog. The following conventions define data for the future generic evaluator; no evaluator is implemented yet:
+`config/access_policies.csv` contains the five-application catalog. The loader and matcher use the following conventions:
 
 - Match enabled rows by exact application/access level and trusted department/title. Semicolons separate allowed values; `*` means any value in that field. Department and title conditions both apply. `eligible_departments` identifies which employees a row applies to, including exception and rejection rows; it does not itself grant eligibility. There is no row-order precedence. Zero or multiple matches must authorize nothing and require IT review.
 - `AUTO_APPROVE` and `REJECT` use `approver_type=NONE` and a blank ID. `MANAGER` uses a blank ID because the one reviewer comes from the requester's `manager_slack_id`. `APPLICATION_OWNER` and `IT_SECURITY` each identify exactly one reviewer through `approver_id`. Reviewer availability and self-approval checks remain required future workflow controls.
@@ -77,7 +79,26 @@ access-ops/
 
 These are prototype policy assumptions, not Customer.io policies. Design and Customer Success are configured for future synthetic records without requiring additional employees now. The Blueprint lists several admin roles and UI features; the locked scope limits this foundation to one elevated example (GitHub Admin), with no UI. Unmatched combinations remain manual-review cases, not implicit approvals or implicit exception grants.
 
-### Local scaffold checks (Python 3.12)
+### Configuration startup boundary
+
+Call `load_configuration(config_directory)` from `access_ops.config` before using policies. The default directory is `config`, relative to the working directory; callers outside the repository root should supply an explicit path. It returns a complete immutable `Configuration` or raises `ConfigurationError`; it never returns partial configuration. No import-time loading or environment-file loader is added.
+
+Validation rules:
+
+- Both UTF-8 CSV files must exist, be readable, contain data, and have exactly the documented columns with no duplicate headers. Malformed CSV, incorrect cell counts, and blank required values fail. UTF-8 BOMs are accepted and surrounding cell whitespace is stripped.
+- Only manager and approver IDs may be blank. Employee status must be `active` or `inactive`; Slack IDs and policy IDs must be unique. Nonblank managers must reference another directory employee; managers of active employees must be active. A blank manager is allowed for the documented top-level employee.
+- The catalog must contain all five applications. Access levels are limited to the existing demo catalog, including only GitHub Admin as the elevated example. Applications may have disabled rows; disabling rules never creates fallback permission.
+- Decisions and approver types must be recognized enum values. Boolean cells must be lowercase `true` or `false`. Policy versions must be positive integers and maximum durations nonnegative integers.
+- Department/title selectors must be distinct semicolon-separated values or `*` alone. Empty list entries and mixed wildcard lists fail. Department/title names are not restricted to current employees, allowing the existing Design and Customer Success rules.
+- Automatic and rejection decisions require `NONE` with no reviewer ID. Review decisions require a reviewer type. `MANAGER` leaves the ID blank; application-owner and IT/security rules require one active directory reviewer. Request-specific manager availability and self-approval checks are deferred.
+- Temporary access requires a positive duration limit; disabling temporary access requires zero. Rejection allows neither temporary nor permanent access. Other rules must allow at least one duration form. Admin requires IT/security approval and temporary-only access capped at seven days. Other duration limits remain CSV-driven.
+- Enabled rules with the same application/access cannot overlap in both department and title selectors, even if no current employee would match. Wildcards overlap every selector. Disabled rows still receive field and consistency validation, but do not participate in overlap detection. Errors identify the file and row or conflicting record IDs.
+
+Use `configuration.employee(slack_user_id)` for exact lookup; unknown IDs return `None`. `match_policy(configuration, slack_user_id, application, access_level)` retrieves trusted employee attributes and refuses unknown or inactive employees. It matches enabled rules by case-sensitive application/access and both department/title selectors. There is no row-order priority or fuzzy matching. One match returns its `AccessPolicy`; zero returns `None`, meaning no policy permission and a future manual-review case. Multiple matches raise `ConfigurationError` defensively even if loading was bypassed.
+
+Matching does not filter by requested duration: later validation must check the selected policy's limits without falling through to another rule. Returning an `AUTO_APPROVE` policy does not change request status. Typed request and audit records are data containers, not validated intake or persisted audit history.
+
+### Local checks (Python 3.12)
 
 Reuse the existing `.venv`. If setting up a fresh checkout, create it with a Python 3.12 interpreter (`python -m venv .venv`). From the repository root in PowerShell:
 
@@ -89,9 +110,9 @@ Reuse the existing `.venv`. If setting up a fresh checkout, create it with a Pyt
 
 `pytest.ini` makes `src/` importable during tests and collects tests from `tests/`; no package installation or activation is needed for these commands. SQLite (`sqlite3`) and CSV support use Python's standard library. Streamlit is deferred until the demo interface is built. All future business logic belongs in `src/access_ops/`, independently of Streamlit.
 
-There is no runnable application yet. Models, CSV validation, policy evaluation, approvals, provisioning, SQLite schema, auditing, notifications, retries, duplicate protection, expiration, and revocation are deliberately deferred. The planned `app.py`, `seed.py`, and behavior test modules will be added when their respective implementation phases begin. The `.env.example` paths match the existing configuration, but environment-file loading is not implemented.
+There is no runnable application yet. Request-field and requested-duration validation, reviewer assignment and authorization, workflow orchestration, approvals, mock Okta, provisioning, SQLite persistence, audit writes, notifications, retries, duplicate-request protection, expiration, revocation, and UI are deliberately deferred. Models describe request and audit data without implementing lifecycle behavior or runtime request validation. The planned `app.py`, `seed.py`, and workflow tests will be added in their respective phases. The `.env.example` paths match the existing configuration, but environment-file loading is not implemented.
 
-The import checks verify the scaffold only. Normal, approval, exception, unauthorized, duplicate, provisioning-failure, expiration, and revocation-failure scenarios still need implementation and behavioral tests before the core prototype can be considered complete.
+Tests cover configuration loading and failure cases, employee lookup, all configured policy selections (automatic, approval-required, exception, and rejection), exact matching, disabled rules, ambiguity, and unmatched combinations. End-to-end approval, unauthorized approval, duplicate processing, provisioning-failure, expiration, and revocation-failure scenarios remain deferred; the core prototype is not yet complete.
 
 Do not commit credentials, tokens, passwords, API keys, or local `.env` files. The `.env` file is gitignored; use `.env.example` as the safe template.
 
