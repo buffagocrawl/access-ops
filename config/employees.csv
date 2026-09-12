@@ -1,0 +1,12 @@
+slack_user_id,name,email,department,title,manager_slack_id,status
+UDEMO001,Alice Engineer,alice.engineer@example.com,Engineering,Software Engineer,UDEMO005,active
+UDEMO002,Paul Product,paul.product@example.com,Product,Product Manager,UDEMO009,active
+UDEMO003,Sarah Sales,sarah.sales@example.com,Sales,Account Executive,UDEMO010,active
+UDEMO004,Ian FormerEmployee,ian.former@example.com,Engineering,Software Engineer,UDEMO005,inactive
+UDEMO005,Mike Manager,mike.manager@example.com,Engineering,Engineering Manager,UDEMO009,active
+UDEMO006,Grace GitHubOwner,grace.github@example.com,Engineering,Application Owner,UDEMO005,active
+UDEMO007,Ivan ITSecurity,ivan.security@example.com,Operations,IT Security Analyst,UDEMO009,active
+UDEMO008,Dana DataOwner,dana.data@example.com,Data,Data Lead,UDEMO009,active
+UDEMO009,Olivia Operations,olivia.operations@example.com,Operations,Operations Director,,active
+UDEMO010,Sam SalesManager,sam.sales@example.com,Sales,Sales Manager,UDEMO009,active
+UDEMO011,Farah Finance,farah.finance@example.com,Finance,Financial Analyst,UDEMO009,active
