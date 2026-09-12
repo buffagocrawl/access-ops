@@ -97,7 +97,6 @@ def test_existing_access_is_confirmed_without_second_grant(system):
 @pytest.mark.parametrize("overrides", [
     {"employee_id": "unknown"}, {"employee_id": "UDEMO004"},
     {"employee_id": "UDEMO002"},
-    {"employee_id": "UDEMO002", "access_level": "Write"},
     {"employee_id": "UDEMO011", "access_level": "Write"},
     {"application": "Notion", "access_level": "Standard"},
     {"application": "Unknown"}, {"access_level": "Owner"},
@@ -360,3 +359,225 @@ def test_approval_audit_failure_blocks_grant(system, monkeypatch, event_type):
     assert database.get(response.request_id).status == expected
     assert calls == []
     assert "private" not in result.message
+
+
+def submit_exception(workflow):
+    return submit(workflow, employee_id="UDEMO002", access_level="Write",
+                  business_reason="Update launch website documentation")
+
+
+def test_exception_pending_and_reviewer_details_survive_reopen(system, tmp_path, monkeypatch):
+    from access_ops.notifications import exception_review
+
+    workflow, database, provider = system
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+    response = submit_exception(workflow)
+    reopened = Database(tmp_path / "workflow.db")
+    try:
+        request = reopened.get(response.request_id)
+        assert request.status == RequestStatus.EXCEPTION_REVIEW
+        assert request.assigned_approver_id == "UDEMO006"
+        assert request.assigned_approver_id != workflow.configuration.employee("UDEMO002").manager_slack_id
+        assert reopened.policy_reference(request.request_id) == ("GH-WRITE-EXCEPTION", 2)
+        assert not request.temporary and request.expires_at is None
+        message = exception_review(request).message
+        assert all(value in message for value in (
+            "UDEMO006", "GitHub", "Write", "Permanent", request.business_reason, "Approve or reject"))
+        assert Workflow(workflow.configuration, reopened, provider).process(request.request_id) == response
+    finally:
+        reopened.close()
+    assert "outside the normal eligibility policy" in response.message
+    assert "may be legitimate" in response.message
+    assert "routed for exception review" in response.message
+    assert calls == [] and provider.access_list() == []
+
+
+@pytest.mark.parametrize("reviewer", ["UDEMO002", "UDEMO009", "UDEMO005", "unknown", "UDEMO004"])
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_exception_unauthorized_decisions_preserve_review(system, reviewer, action):
+    workflow, database, provider = system
+    response = submit_exception(workflow)
+    result = getattr(workflow, action)(response.request_id, reviewer)
+    assert "Approval rejected" in result.message
+    assert database.get(response.request_id).status == RequestStatus.EXCEPTION_REVIEW
+    assert database.events(response.request_id)[-1].event_type == "APPROVAL_REJECTED"
+    assert database.events(response.request_id)[-1].actor == reviewer
+    assert provider.access_list() == []
+
+
+def test_exception_approval_commits_audit_before_mock_okta(system, tmp_path, monkeypatch):
+    workflow, database, provider = system
+    response = submit_exception(workflow)
+    original = provider.grant
+    calls = []
+    expected = ["EXCEPTION_DETECTED", "EXCEPTION_ROUTED", "APPROVAL_ATTEMPTED",
+                "EXCEPTION_APPROVED", "REVALIDATION_SUCCEEDED", "PROVISIONING_STARTED"]
+
+    def observe(request):
+        reader = Database(tmp_path / "workflow.db")
+        try:
+            assert reader.get(request.request_id).status == RequestStatus.PROVISIONING
+            assert [e.event_type for e in reader.events(request.request_id)] == expected
+            assert reader.events(request.request_id)[3].actor == "UDEMO006"
+        finally:
+            reader.close()
+        calls.append(request.request_id)
+        return original(request)
+
+    monkeypatch.setattr(provider, "grant", observe)
+    result = workflow.approve(response.request_id, "UDEMO006")
+    assert database.get(response.request_id).status == RequestStatus.ACTIVE
+    assert database.get(response.request_id).provisioning_result == GrantResult.GRANTED
+    assert provider.access_list() == [("UDEMO002", "GitHub", "Write")]
+    assert "access is granted in the mock directory" in result.message
+    events = database.events(response.request_id)
+    assert [e.event_type for e in events] == expected + ["PROVISIONING_SUCCEEDED"]
+    assert all(e.policy_version == 2 and "GH-WRITE-EXCEPTION" in e.details for e in events)
+    assert events[3].previous_status == RequestStatus.EXCEPTION_REVIEW
+    assert events[3].new_status == RequestStatus.APPROVED
+    assert "Approval rejected" in workflow.approve(response.request_id, "UDEMO006").message
+    assert calls == [response.request_id]
+
+
+def test_exception_rejection_is_final_and_persisted(system, tmp_path):
+    workflow, database, provider = system
+    response = submit_exception(workflow)
+    assert "was rejected" in workflow.reject(response.request_id, "UDEMO006").message
+    reopened = Database(tmp_path / "workflow.db")
+    try:
+        assert reopened.get(response.request_id).status == RequestStatus.REJECTED
+        event = reopened.events(response.request_id)[-1]
+        assert event.event_type == "EXCEPTION_REJECTED" and event.actor == "UDEMO006"
+    finally:
+        reopened.close()
+    workflow.approve(response.request_id, "UDEMO006")
+    workflow.process(response.request_id)
+    assert provider.access_list() == []
+
+
+@pytest.mark.parametrize("reviewer", [None, "unknown", "UDEMO002", "UDEMO004"])
+def test_exception_unresolvable_reviewer_preserves_request_and_audit(system, reviewer):
+    workflow, database, provider = system
+    workflow.configuration = replace(workflow.configuration, policies=tuple(
+        replace(p, approver_id=reviewer) if p.policy_id == "GH-WRITE-EXCEPTION" else p
+        for p in workflow.configuration.policies))
+    response = submit_exception(workflow)
+    assert response.request_id is not None
+    assert "Review is blocked" in response.message
+    request = database.get(response.request_id)
+    assert request.status == RequestStatus.EXCEPTION_REVIEW
+    assert request.assigned_approver_id is None
+    assert [e.event_type for e in database.events(response.request_id)] == [
+        "EXCEPTION_DETECTED", "EXCEPTION_ROUTING_FAILED"]
+    workflow.approve(response.request_id, "UDEMO006")
+    workflow.process(response.request_id)
+    assert provider.access_list() == []
+
+
+@pytest.mark.parametrize("change", ["inactive", "missing", "department", "policy", "duration", "reviewer"])
+@pytest.mark.parametrize("timing", ["pending", "after_approval"])
+def test_exception_revalidates_before_provisioning(system, monkeypatch, change, timing):
+    workflow, database, provider = system
+    response = submit_exception(workflow)
+
+    def change_configuration():
+        config = workflow.configuration
+        if change in ("policy", "duration", "reviewer"):
+            changes = {"policy": {"policy_version": 3}, "duration": {"permanent_allowed": False},
+                       "reviewer": {"approver_id": "UDEMO007"}}
+            config = replace(config, policies=tuple(
+                replace(p, **changes[change]) if p.policy_id == "GH-WRITE-EXCEPTION" else p
+                for p in config.policies))
+        else:
+            employees = []
+            for e in config.employees:
+                if e.slack_user_id == "UDEMO002":
+                    if change == "missing":
+                        continue
+                    e = replace(e, **({"status": EmployeeStatus.INACTIVE} if change == "inactive"
+                                      else {"department": "Finance"}))
+                employees.append(e)
+            config = replace(config, employees=tuple(employees))
+        workflow.configuration = config
+
+    if timing == "pending":
+        change_configuration()
+    else:
+        original = database.transition
+
+        def transition_then_change(request, event):
+            original(request, event)
+            if event.event_type == "EXCEPTION_APPROVED":
+                change_configuration()
+
+        monkeypatch.setattr(database, "transition", transition_then_change)
+    result = workflow.approve(response.request_id, "UDEMO006")
+    blocked_at_review = change == "reviewer" and timing == "pending"
+    assert database.get(response.request_id).status == (
+        RequestStatus.EXCEPTION_REVIEW if blocked_at_review else RequestStatus.REJECTED)
+    assert database.events(response.request_id)[-1].event_type == (
+        "APPROVAL_REJECTED" if blocked_at_review else "REVALIDATION_FAILED")
+    assert "access is granted" not in result.message
+    assert provider.access_list() == []
+
+
+@pytest.mark.parametrize("event_type", ["EXCEPTION_APPROVED", "REVALIDATION_SUCCEEDED", "PROVISIONING_STARTED"])
+def test_exception_audit_failure_blocks_provider(system, monkeypatch, event_type):
+    workflow, database, provider = system
+    response = submit_exception(workflow)
+    original = database.append_event
+
+    def fail(event):
+        if event.event_type == event_type:
+            raise RuntimeError("private database error")
+        original(event)
+
+    monkeypatch.setattr(database, "append_event", fail)
+    result = workflow.approve(response.request_id, "UDEMO006")
+    assert database.get(response.request_id).status != RequestStatus.ACTIVE
+    assert provider.access_list() == []
+    assert "private" not in result.message
+
+
+@pytest.mark.parametrize("change", ["inactive", "missing"])
+def test_exception_reviewer_unavailable_while_pending(system, change):
+    workflow, database, provider = system
+    response = submit_exception(workflow)
+    employees = tuple(
+        replace(e, status=EmployeeStatus.INACTIVE) if e.slack_user_id == "UDEMO006" else e
+        for e in workflow.configuration.employees
+        if not (change == "missing" and e.slack_user_id == "UDEMO006"))
+    workflow.configuration = replace(workflow.configuration, employees=employees)
+    assert "Approval rejected" in workflow.approve(response.request_id, "UDEMO006").message
+    assert database.get(response.request_id).status == RequestStatus.EXCEPTION_REVIEW
+    assert database.events(response.request_id)[-1].event_type == "APPROVAL_REJECTED"
+    assert provider.access_list() == []
+
+
+def test_exception_reviewer_is_configured_not_hardcoded(system):
+    from access_ops.models import ApproverType
+
+    workflow, database, provider = system
+    workflow.configuration = replace(workflow.configuration, policies=tuple(
+        replace(p, approver_type=ApproverType.IT_SECURITY, approver_id="UDEMO007")
+        if p.policy_id == "GH-WRITE-EXCEPTION" else p for p in workflow.configuration.policies))
+    response = submit_exception(workflow)
+    assert database.get(response.request_id).assigned_approver_id == "UDEMO007"
+    assert "Approval rejected" in workflow.approve(response.request_id, "UDEMO006").message
+    workflow.approve(response.request_id, "UDEMO007")
+    assert database.get(response.request_id).status == RequestStatus.ACTIVE
+    assert provider.access_list() == [("UDEMO002", "GitHub", "Write")]
+
+
+def test_exception_provider_failure_preserves_approval(system, monkeypatch):
+    workflow, database, provider = system
+    response = submit_exception(workflow)
+    monkeypatch.setattr(provider, "grant", lambda request: GrantResult.FAILED)
+    result = workflow.approve(response.request_id, "UDEMO006")
+    assert database.get(response.request_id).status == RequestStatus.PROVISIONING_FAILED
+    events = database.events(response.request_id)
+    assert any(e.event_type == "EXCEPTION_APPROVED" and e.actor == "UDEMO006" for e in events)
+    assert events[-1].event_type == "PROVISIONING_FAILED"
+    assert provider.access_list() == []
+    assert "Access could not be confirmed" in result.message
