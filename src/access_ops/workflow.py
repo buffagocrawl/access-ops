@@ -1,15 +1,15 @@
-"""UI-independent orchestration for permanent Engineering GitHub Read/Write access."""
+"""UI-independent orchestration for permanent GitHub access and single-reviewer exceptions."""
 from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from .audit import event_for
-from .approvals import manager_for
+from .approvals import manager_for, exception_reviewer_for
 from .config import APPLICATION_ACCESS, Configuration
 from .database import Database
 from .integrations.mock_okta import AccessProvider, GrantResult
 from .models import AccessRequest, AuditEvent, ApproverType, Decision, EmployeeStatus, RequestStatus
-from .notifications import granted, pending, stopped
+from .notifications import granted, pending, exception_pending, stopped
 from .policy_engine import match_policy
 
 
@@ -33,14 +33,18 @@ class Workflow:
         if access_level not in APPLICATION_ACCESS.get(application, set()):
             raise IntakeError("Choose a supported application and access level. No request was processed.")
         policy = match_policy(self.configuration, employee_id, application, access_level)
-        if policy is None or policy.decision not in (Decision.AUTO_APPROVE, Decision.APPROVAL_REQUIRED):
+        if policy is None or policy.decision not in (Decision.AUTO_APPROVE, Decision.APPROVAL_REQUIRED, Decision.EXCEPTION_REVIEW):
             raise IntakeError("This request cannot use automatic provisioning. Contact IT; no access was granted.")
+        exception = policy.decision == Decision.EXCEPTION_REVIEW
         # Phase gate only: eligibility and approval decisions still come from CSV.
         if (application != "GitHub" or access_level not in ("Read", "Write")
-                or employee.department != "Engineering"):
-            raise IntakeError("This phase supports Engineering GitHub Read/Write only. Contact IT for other access.")
-        if ((access_level == "Read" and policy.decision != Decision.AUTO_APPROVE)
-                or (access_level == "Write" and (policy.decision != Decision.APPROVAL_REQUIRED
+                or (not exception and employee.department != "Engineering")):
+            raise IntakeError("This phase supports Engineering GitHub Read/Write and configured GitHub Write "
+                              "exceptions. Contact IT for other access.")
+        if ((exception and (access_level != "Write" or policy.approver_type not in
+                            (ApproverType.APPLICATION_OWNER, ApproverType.IT_SECURITY)))
+                or (access_level == "Read" and policy.decision != Decision.AUTO_APPROVE)
+                or (access_level == "Write" and not exception and (policy.decision != Decision.APPROVAL_REQUIRED
                     or policy.approver_type != ApproverType.MANAGER))):
             raise IntakeError("The configured approval path is unsupported. Contact IT; no access was granted.")
         if duration != "Permanent" or not policy.permanent_allowed:
@@ -55,22 +59,36 @@ class Workflow:
                 reviewer = manager_for(self.configuration, employee_id, policy)
                 if reviewer is None:
                     raise IntakeError("A valid manager could not be resolved. Contact IT; no access was granted.")
+            exception = policy.decision == Decision.EXCEPTION_REVIEW
+            if exception:
+                reviewer = exception_reviewer_for(self.configuration, employee_id, policy)
             now = datetime.now(timezone.utc)
             request = AccessRequest(
                 request_id=f"REQ-{uuid4().hex}", requester_slack_id=employee_id,
                 application=application, access_level=access_level, business_reason=business_reason,
                 temporary=False, expires_at=None, created_at=now, updated_at=now,
-                status=RequestStatus.PENDING_APPROVAL if reviewer else RequestStatus.APPROVED,
+                status=(RequestStatus.EXCEPTION_REVIEW if exception else
+                        RequestStatus.PENDING_APPROVAL if reviewer else RequestStatus.APPROVED),
                 assigned_approver_id=reviewer,
             )
             self.database.create(request, policy, event_for(
-                request, policy, "REQUEST_SUBMITTED" if reviewer else "REQUEST_AUTO_APPROVED", None,
+                request, policy, "EXCEPTION_DETECTED" if exception else
+                "REQUEST_SUBMITTED" if reviewer else "REQUEST_AUTO_APPROVED", None,
+                "Request is outside normal eligibility; exception review required." if exception else
                 "Request created pending manager approval." if reviewer else "Request created and automatically approved."
             ))
+            if exception:
+                request = self._record(
+                    request, "EXCEPTION_ROUTED" if reviewer else "EXCEPTION_ROUTING_FAILED",
+                    f"Assigned exception reviewer {reviewer}." if reviewer else
+                    "Configured exception reviewer could not be resolved; review is blocked.",
+                )
         except IntakeError as error:
             return stopped(str(error))
         except Exception:
             return stopped("The request could not be recorded safely. Contact IT; no access was granted.")
+        if exception:
+            return exception_pending(request)
         return pending(request) if reviewer else self.process(request.request_id)
 
     def _record(self, request, event_type, details, actor="access_ops", status=None):
@@ -86,21 +104,47 @@ class Workflow:
 
     def approve(self, request_id, reviewer_id):
         """Reviewer identity is supplied by trusted local demo code, like intake identity."""
+        return self._review(request_id, reviewer_id)
+
+    def reject(self, request_id, reviewer_id):
+        """Reject a pending exception using the same reviewer authorization checks."""
+        return self._review(request_id, reviewer_id, reject=True)
+
+    def _review(self, request_id, reviewer_id, reject=False):
         try:
             request = self.database.get(request_id)
             if request is None:
                 return stopped("Request not found. Check the request ID or contact IT.")
-            request = self._record(request, "APPROVAL_ATTEMPTED", "Approval attempted.", reviewer_id)
+            request = self._record(request, "APPROVAL_ATTEMPTED",
+                                   "Rejection attempted." if reject else "Approval attempted.", reviewer_id)
             reviewer = self.configuration.employee(reviewer_id)
-            if (request.status != RequestStatus.PENDING_APPROVAL
+            exception = request.status == RequestStatus.EXCEPTION_REVIEW
+            current_reviewer = None
+            if exception:
+                saved_id, _ = self.database.policy_reference(request_id)
+                policy = next((p for p in self.configuration.policies
+                               if p.policy_id == saved_id and p.enabled), None)
+                if policy is not None:
+                    current_reviewer = exception_reviewer_for(
+                        self.configuration, request.requester_slack_id, policy)
+            if (request.status not in (RequestStatus.PENDING_APPROVAL, RequestStatus.EXCEPTION_REVIEW)
+                    or (reject and not exception)
+                    or (exception and current_reviewer != reviewer_id)
                     or reviewer_id == request.requester_slack_id
                     or not request.assigned_approver_id
                     or reviewer_id != request.assigned_approver_id
                     or reviewer is None or reviewer.status != EmployeeStatus.ACTIVE):
                 self._record(request, "APPROVAL_REJECTED", "Reviewer or request state is not authorized.", reviewer_id)
-                return stopped("Approval rejected. Only the assigned manager may approve a pending request; "
+                return stopped("Approval rejected. Only the assigned reviewer may decide a pending request; "
                                "self-approval is prohibited. No access was granted by this attempt.", request_id)
-            self._record(request, "REQUEST_APPROVED", "Assigned manager approved the request.",
+            if reject:
+                self._record(request, "EXCEPTION_REJECTED", "Assigned reviewer rejected the exception.",
+                             reviewer_id, RequestStatus.REJECTED)
+                return stopped("Your exception request was rejected by the assigned reviewer. "
+                               "No access was granted. Contact IT for further guidance.", request_id)
+            self._record(request, "EXCEPTION_APPROVED" if exception else "REQUEST_APPROVED",
+                         "Assigned reviewer approved the exception." if exception else
+                         "Assigned manager approved the request.",
                          reviewer_id, RequestStatus.APPROVED)
         except Exception:
             return stopped("Approval stopped safely. Contact IT to check the request state.", request_id)
@@ -114,6 +158,8 @@ class Workflow:
                 return stopped("Request not found. Check the request ID or contact IT.")
             if request.status == RequestStatus.ACTIVE:
                 return granted(request)
+            if request.status == RequestStatus.EXCEPTION_REVIEW:
+                return exception_pending(request)
             if request.status == RequestStatus.PENDING_APPROVAL:
                 return pending(request)
             if request.status != RequestStatus.APPROVED:
@@ -127,11 +173,14 @@ class Workflow:
                 if self.database.policy_reference(request_id) != (policy.policy_id, policy.policy_version):
                     raise IntakeError("Policy changed. Contact IT; no provisioning was attempted.")
                 if human:
-                    reviewer = manager_for(self.configuration, request.requester_slack_id, policy)
+                    exception = policy.decision == Decision.EXCEPTION_REVIEW
+                    resolver = exception_reviewer_for if exception else manager_for
+                    reviewer = resolver(self.configuration, request.requester_slack_id, policy)
+                    approval_event = "EXCEPTION_APPROVED" if exception else "REQUEST_APPROVED"
                     if (reviewer is None or reviewer != request.assigned_approver_id
-                            or not any(e.event_type == "REQUEST_APPROVED" and e.actor == reviewer
+                            or not any(e.event_type == approval_event and e.actor == reviewer
                                        for e in self.database.events(request_id))):
-                        raise IntakeError("Manager approval is no longer valid. Contact IT; no access was granted.")
+                        raise IntakeError("Reviewer approval is no longer valid. Contact IT; no access was granted.")
             except Exception:
                 if human:
                     self._record(request, "REVALIDATION_FAILED", "Current employee, policy, or approval is invalid.",

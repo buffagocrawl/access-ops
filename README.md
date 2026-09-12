@@ -12,9 +12,9 @@ An agentic natural-language intake architecture is documented for comparison and
 
 ### Implemented behavior
 
-The configuration and data-model layer uses the Python standard library: immutable typed records, validated CSV loading, exact employee lookup, and deterministic policy selection. Both original CSV files are preserved. The first end-to-end workflow now supports an active Engineering employee requesting permanent GitHub Read access under the configured `AUTO_APPROVE` policy, with SQLite request/audit state, a mocked Okta directory, and safe Slack-style feedback. A policy match alone does not authorize provisioning; the workflow enforces validation, revalidation, and the committed audit requirement.
+The configuration and data-model layer uses the Python standard library: immutable typed records, validated CSV loading, exact employee lookup, and deterministic policy selection. The first end-to-end workflow now supports an active Engineering employee requesting permanent GitHub Read access under the configured `AUTO_APPROVE` policy, with SQLite request/audit state, a mocked Okta directory, and safe Slack-style feedback. A policy match alone does not authorize provisioning; the workflow enforces validation, revalidation, and the committed audit requirement.
 
-Engineering GitHub Write now uses one configured manager approval before provisioning, as described below.
+Engineering GitHub Write uses one configured manager approval. Product GitHub Write enters exception review with one configured application owner, as described below.
 
 ### Planned behavior
 
@@ -179,7 +179,36 @@ print(workflow.approve(response.request_id, reviewer_id="UDEMO005").message)
 
 Configuration remains an immutable in-memory snapshot: trusted calling code must explicitly assign `workflow.configuration = load_configuration("config")` to adopt CSV changes before approval. CSV files are not watched automatically. Reviewer identity is mocked, not authenticated by this service. Processing remains sequential. Existing SQLite databases gain one nullable `assigned_approver_id` column on opening; existing requests are preserved.
 
-Tests cover pending persistence, no provisioning while pending, wrong/self reviewers, correct manager approval, approval audit ordering, revalidation both while pending and after approval, inactive/missing/ineligible requesters, changed policy/manager, unresolved reviewers, and audit failures. Only normal permanent Engineering GitHub Write approval is added. Exception review, denial actions, temporary access/expiration/revocation, broader invalid-input handling, failure injection, retries, and generalized idempotency remain later work.
+Tests cover pending persistence, no provisioning while pending, wrong/self reviewers, correct manager approval, approval audit ordering, revalidation both while pending and after approval, inactive/missing/ineligible requesters, changed policy/manager, unresolved reviewers, and audit failures. Step 12 adds normal permanent Engineering GitHub Write approval. Step 13 extends this machinery for exception review as described next. Temporary access/expiration/revocation, broader invalid-input handling, failure injection, retries, and generalized idempotency remain later work.
+
+### Exception review (Phase 6, Step 13)
+
+Product Manager Paul (`UDEMO002`) requesting GitHub Write matches `GH-WRITE-EXCEPTION` and enters `EXCEPTION_REVIEW`. The CSV assigns Grace, the GitHub owner (`UDEMO006`), directly. Paul's manager is not involved. This preserves the human decision to reject the earlier AI suggestion of a manager plus owner approval chain. The existing policy also covers Sales; no additional exception rules are introduced.
+
+**Duration assumption for this step:** the previous exception CSV row allowed only temporary access, which conflicts with demonstrating provisioning before temporary access is implemented. This step explicitly permits Permanent access on that demo policy and increments its version to 2. Permanent remains the only accepted duration; no duration checks are bypassed. The existing permanent-only SQLite representation reloads requests with `temporary=False` and `expires_at=None`. Temporary duration storage, expiration, and revocation are deferred. Planning documents are unchanged.
+
+```python
+from access_ops.notifications import exception_review
+
+response = workflow.submit(
+    employee_id="UDEMO002", application="GitHub", access_level="Write",
+    business_reason="Update launch website documentation", duration="Permanent",
+)
+print(response.message)
+# Private reviewer feedback in trusted local demo code; no real Slack delivery.
+print(exception_review(database.get(response.request_id)).message)
+print(workflow.approve(response.request_id, reviewer_id="UDEMO006").message)
+# Alternatively, while still pending:
+# workflow.reject(response.request_id, reviewer_id="UDEMO006")
+```
+
+The reviewer message uses the saved request's business reason and access level, and identifies the supported Permanent duration. Approval/rejection requires the single assigned, active reviewer, who must still match the configured application owner or IT/Security reviewer. Self-approval, unauthorized decisions, and decisions after completion are rejected and audited. Rejection records `REJECTED` and grants nothing. No normal manager denial workflow is added.
+
+An unresolved, inactive, or self-referencing exception reviewer leaves a saved `EXCEPTION_REVIEW` request with no assigned approver, records `EXCEPTION_ROUTING_FAILED`, and returns a blocked-review message with the request ID. There is no fallback reviewer or automatic rerouting. Startup CSV validation continues to reject invalid reviewer configuration; the workflow check also handles unavailable reviewers in the current in-memory configuration.
+
+Approval records `EXCEPTION_APPROVED`, then revalidates the current requester, matched exception policy and version, duration permission, and reviewer authority before entering the existing Mock Okta provisioning flow. This validates the configured exception policy rather than requiring Engineering eligibility. Provider confirmation is still required for `ACTIVE`.
+
+Audit history records `EXCEPTION_DETECTED`, `EXCEPTION_ROUTED` (or routing failure), approval attempts and rejected attempts, `EXCEPTION_APPROVED` or `EXCEPTION_REJECTED`, requester/policy/approval revalidation, and provisioning outcomes. Tests verify persistence, reviewer details, authorization, rejection, changed requester/policy/reviewer data, committed audit ordering, and audit failure safety. Configuration reload and sequential-processing limitations from Step 12 still apply.
 
 Do not commit credentials, tokens, passwords, API keys, or local `.env` files. The `.env` file is gitignored; use `.env.example` as the safe template.
 
