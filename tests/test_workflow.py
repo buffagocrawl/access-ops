@@ -108,7 +108,8 @@ def test_invalid_or_out_of_slice_intake_never_calls_provider(system, monkeypatch
     calls = []
     monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
     response = submit(workflow, **overrides)
-    assert response.request_id is None
+    assert response.request_id is not None
+    assert database.events(response.request_id)[0].event_type == "INTAKE_STOPPED"
     assert calls == []
     assert provider.access_list() == []
     assert database.connection.execute("SELECT count(*) FROM requests").fetchone()[0] == 0
@@ -131,7 +132,7 @@ def test_configuration_controls_authorization(system, monkeypatch, change):
     workflow.configuration = replace(workflow.configuration, policies=policies)
     calls = []
     monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
-    assert submit(workflow).request_id is None
+    assert submit(workflow).request_id is not None
     assert calls == []
 
 
@@ -204,9 +205,9 @@ def test_revalidation_after_creation_before_provider(system, monkeypatch, change
 
     monkeypatch.setattr(database, "create", create_then_change)
     response = submit(workflow)
-    assert database.get(response.request_id).status == RequestStatus.APPROVED
+    assert database.get(response.request_id).status == RequestStatus.REJECTED
     assert provider.access_list() == []
-    assert len(database.events(response.request_id)) == 1
+    assert [e.event_type for e in database.events(response.request_id)] == ["REQUEST_AUTO_APPROVED", "REVALIDATION_FAILED"]
 
 
 def test_unknown_request_cannot_provision(system):
@@ -329,15 +330,22 @@ def test_approval_revalidates_current_trusted_configuration(system, monkeypatch,
 
 
 @pytest.mark.parametrize("manager", [None, "unknown", "UDEMO001", "UDEMO004"])
-def test_unresolvable_manager_fails_closed(system, manager):
+def test_unresolvable_manager_fails_closed(system, monkeypatch, manager):
     workflow, database, provider = system
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
     workflow.configuration = replace(workflow.configuration, employees=tuple(
         replace(e, manager_slack_id=manager) if e.slack_user_id == "UDEMO001" else e
         for e in workflow.configuration.employees))
     response = submit(workflow, access_level="Write")
-    assert response.request_id is None
+    assert database.get(response.request_id).status == RequestStatus.PENDING_APPROVAL
+    assert database.get(response.request_id).assigned_approver_id is None
+    assert [e.event_type for e in database.events(response.request_id)] == ["REQUEST_SUBMITTED", "APPROVAL_ROUTING_FAILED"]
+    assert workflow.process(response.request_id) == response
+    workflow.approve(response.request_id, "UDEMO005")
+    assert database.get(response.request_id).status == RequestStatus.PENDING_APPROVAL
     assert "manager could not be resolved" in response.message
-    assert provider.access_list() == []
+    assert calls == [] and provider.access_list() == []
 
 
 @pytest.mark.parametrize("event_type", ["APPROVAL_ATTEMPTED", "REQUEST_APPROVED", "REVALIDATION_SUCCEEDED"])
@@ -457,8 +465,10 @@ def test_exception_rejection_is_final_and_persisted(system, tmp_path):
 
 
 @pytest.mark.parametrize("reviewer", [None, "unknown", "UDEMO002", "UDEMO004"])
-def test_exception_unresolvable_reviewer_preserves_request_and_audit(system, reviewer):
+def test_exception_unresolvable_reviewer_preserves_request_and_audit(system, monkeypatch, reviewer):
     workflow, database, provider = system
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
     workflow.configuration = replace(workflow.configuration, policies=tuple(
         replace(p, approver_id=reviewer) if p.policy_id == "GH-WRITE-EXCEPTION" else p
         for p in workflow.configuration.policies))
@@ -472,7 +482,7 @@ def test_exception_unresolvable_reviewer_preserves_request_and_audit(system, rev
         "EXCEPTION_DETECTED", "EXCEPTION_ROUTING_FAILED"]
     workflow.approve(response.request_id, "UDEMO006")
     workflow.process(response.request_id)
-    assert provider.access_list() == []
+    assert calls == [] and provider.access_list() == []
 
 
 @pytest.mark.parametrize("change", ["inactive", "missing", "department", "policy", "duration", "reviewer"])
@@ -581,3 +591,85 @@ def test_exception_provider_failure_preserves_approval(system, monkeypatch):
     assert events[-1].event_type == "PROVISIONING_FAILED"
     assert provider.access_list() == []
     assert "Access could not be confirmed" in result.message
+
+
+@pytest.mark.parametrize("overrides,phrase,status", [
+    ({"business_reason": "  "}, "Provide a business reason", RequestStatus.NEEDS_INFORMATION),
+    ({"business_reason": None}, "Provide a business reason", RequestStatus.NEEDS_INFORMATION),
+    ({"application": "Github"}, "application is unsupported", RequestStatus.REJECTED),
+    ({"access_level": "write"}, "access level is unsupported for GitHub", RequestStatus.REJECTED),
+    ({"employee_id": "UDEMO004"}, "account is inactive", RequestStatus.REJECTED),
+    ({"employee_id": "unknown"}, "not found in the trusted directory", RequestStatus.REJECTED),
+])
+def test_invalid_intake_has_durable_deterministic_audit(system, tmp_path, monkeypatch, overrides, phrase, status):
+    workflow, database, provider = system
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+
+    def unexpected_policy(*args):
+        pytest.fail("Invalid intake must stop before policy execution")
+
+    monkeypatch.setattr("access_ops.workflow.match_policy", unexpected_policy)
+    for _ in range(2):
+        response = submit(workflow, **overrides)
+        assert phrase in response.message
+        assert response.request_id in response.message
+        reader = Database(tmp_path / "workflow.db")
+        try:
+            assert reader.get(response.request_id) is None  # No invented policy/employee.
+            events = reader.events(response.request_id)
+            assert len(events) == 1
+            event = events[0]
+            assert (event.event_type, event.previous_status, event.new_status) == ("INTAKE_STOPPED", None, status)
+            assert event.policy_version is None and event.actor == "access_ops"
+            assert phrase in event.details
+        finally:
+            reader.close()
+        workflow.process(response.request_id)
+        workflow.approve(response.request_id, "UDEMO005")
+        assert database.events(response.request_id) == events
+    assert calls == [] and provider.access_list() == []
+
+
+@pytest.mark.parametrize("mode", ["removed", "disabled", "unmatched", "ambiguous"])
+def test_missing_or_ambiguous_policy_is_audited_and_closed(system, monkeypatch, mode):
+    workflow, database, provider = system
+    config = workflow.configuration
+    policy = next(p for p in config.policies if p.policy_id == "GH-READ-ENG")
+    policies = tuple(p for p in config.policies if p != policy)
+    if mode == "disabled":
+        policies += (replace(policy, enabled=False),)
+    elif mode == "unmatched":
+        policies += (replace(policy, eligible_departments=frozenset({"Finance"})),)
+    elif mode == "ambiguous":
+        policies += (policy, replace(policy, policy_id="CONFLICT"))
+    workflow.configuration = replace(config, policies=policies)
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+    response = submit(workflow)
+    assert "configuration correction" in response.message
+    assert "No enabled policy" in response.message if mode != "ambiguous" else "Policy configuration" in response.message
+    event = database.events(response.request_id)[0]
+    assert event.event_type == "INTAKE_STOPPED" and event.new_status == RequestStatus.REJECTED
+    assert event.policy_version is None
+    assert calls == [] and provider.access_list() == []
+
+
+@pytest.mark.parametrize("boundary", ["policy", "audit"])
+def test_intake_internal_errors_return_fixed_safe_feedback(system, monkeypatch, boundary):
+    workflow, database, provider = system
+
+    def fail(*args):
+        raise RuntimeError("Traceback: sqlite secret=private-token database=/private/access.db")
+
+    if boundary == "policy":
+        monkeypatch.setattr("access_ops.workflow.match_policy", fail)
+        response = submit(workflow)
+    else:
+        monkeypatch.setattr(database, "append_event", fail)
+        response = submit(workflow, business_reason="")
+    assert "could not be recorded safely" in response.message
+    assert "Contact IT" in response.message
+    assert all(value not in response.message for value in ("Traceback", "sqlite", "private-token", "/private", "RuntimeError"))
+    assert provider.access_list() == []
+    assert database.connection.execute("SELECT count(*) FROM requests").fetchone()[0] == 0

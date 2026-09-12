@@ -22,6 +22,12 @@ def stopped(message, request_id=None):
 
 
 def pending(request):
+    if not request.assigned_approver_id:
+        return stopped(
+            "Your request is saved pending manager approval, but a valid configured manager could not be resolved. "
+            "Review is blocked until the configuration is corrected. Contact IT with this request ID; "
+            "no access was granted.", request.request_id,
+        )
     return stopped(
         f"{request.application} {request.access_level} request submitted and pending manager approval "
         f"from <@{request.assigned_approver_id}>. No access has been granted. "
