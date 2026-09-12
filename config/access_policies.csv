@@ -1,0 +1,13 @@
+policy_id,application,access_level,eligible_departments,eligible_titles,decision,approver_type,approver_id,temporary_allowed,max_duration_days,permanent_allowed,enabled,policy_version
+GH-READ-ENG,GitHub,Read,Engineering,*,AUTO_APPROVE,NONE,,true,30,true,true,1
+GH-WRITE-ENG,GitHub,Write,Engineering,*,APPROVAL_REQUIRED,MANAGER,,true,30,true,true,1
+GH-WRITE-EXCEPTION,GitHub,Write,Product;Sales,*,EXCEPTION_REVIEW,APPLICATION_OWNER,UDEMO006,true,7,false,true,1
+GH-WRITE-REJECT,GitHub,Write,Finance;Operations;Data,*,REJECT,NONE,,false,0,false,true,1
+GH-ADMIN-ENG,GitHub,Admin,Engineering,Engineering Manager,APPROVAL_REQUIRED,IT_SECURITY,UDEMO007,true,7,false,true,1
+FIGMA-VIEW,Figma,View,*,*,AUTO_APPROVE,NONE,,true,30,true,true,1
+FIGMA-EDITOR,Figma,Editor,Product;Design,*,AUTO_APPROVE,NONE,,true,30,true,true,1
+NOTION-STANDARD,Notion,Standard,*,*,AUTO_APPROVE,NONE,,true,30,true,true,1
+SF-STANDARD,Salesforce,Standard,Sales;Customer Success,*,APPROVAL_REQUIRED,MANAGER,,true,30,true,true,1
+SF-STANDARD-REJECT,Salesforce,Standard,Engineering;Product;Finance;Operations;Data;Design,*,REJECT,NONE,,false,0,false,true,1
+SNOW-READ,Snowflake,Read,Data;Engineering,*,APPROVAL_REQUIRED,MANAGER,,true,30,true,true,1
+SNOW-WRITE,Snowflake,Write,Data;Engineering,*,APPROVAL_REQUIRED,APPLICATION_OWNER,UDEMO008,true,30,false,true,1
