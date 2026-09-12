@@ -215,3 +215,16 @@ Do not commit credentials, tokens, passwords, API keys, or local `.env` files. T
 ## Planning references
 
 The [`Planning/`](Planning/) directory is the source of truth for architecture, scope, implementation boundaries, assumptions, workflow states, and the deterministic-versus-agentic decision.
+
+
+### Missing and invalid requests (Phase 6, Step 14)
+
+Intake checks trusted employee identity/status, required fields, and exact catalog values before policy execution. Missing business reason returns a correction message; unsupported applications and roles are never corrected or substituted. Unknown/inactive employees, missing or disabled matching policies, and ambiguous policy configuration grant nothing and return safe IT guidance.
+
+Pre-policy failures receive a UUID request reference and a durable `INTAKE_STOPPED` event in the existing audit table: `NEEDS_INFORMATION` for missing fields, otherwise `REJECTED`. These are audit-only references, retrievable with `database.events(response.request_id)`; no request row is created because the existing request schema requires a matched policy. No synthetic employee or policy is created, and raw input is not copied into audit details. These references cannot be processed or approved. Corrected intake requires a new submission. If audit persistence fails, the response explicitly says recording failed and directs the employee to IT; no reference or successful recording is claimed.
+
+Missing managers now preserve `PENDING_APPROVAL` with no assigned reviewer and `APPROVAL_ROUTING_FAILED`, matching the existing blocked `EXCEPTION_REVIEW` behavior for missing exception reviewers. Neither allows approval or provisioning, chooses a fallback, or automatically reroutes after configuration correction. IT must correct configuration; recovery/rerouting is deferred. Startup CSV validation remains strict; runtime checks also defend against unavailable reviewers in the in-memory configuration.
+
+Revalidation failures now record `REVALIDATION_FAILED` and `REJECTED` for automatic as well as human-approved requests. Existing approval history is retained. Tests cover each invalid outcome, audit persistence and deterministic states, exact matching, blocked managers and exception reviewers, no provider calls, and safe messages on internal errors.
+
+The existing permanent GitHub Read/Write phase limits remain. Temporary access, expiration/revocation, failure-injection controls, retries, generalized idempotency, and blocked-request recovery are intentionally deferred. Planning documents and configuration are unchanged.

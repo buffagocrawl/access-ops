@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from .audit import event_for
 from .approvals import manager_for, exception_reviewer_for
-from .config import APPLICATION_ACCESS, Configuration
+from .config import APPLICATION_ACCESS, Configuration, ConfigurationError
 from .database import Database
 from .integrations.mock_okta import AccessProvider, GrantResult
 from .models import AccessRequest, AuditEvent, ApproverType, Decision, EmployeeStatus, RequestStatus
@@ -14,7 +14,11 @@ from .policy_engine import match_policy
 
 
 class IntakeError(ValueError):
-    """A fixed, employee-safe validation message."""
+    """A fixed, employee-safe validation message and deterministic intake outcome."""
+
+    def __init__(self, message, status=RequestStatus.REJECTED):
+        super().__init__(message)
+        self.status = status
 
 
 class Workflow:
@@ -25,15 +29,24 @@ class Workflow:
 
     def _validate(self, employee_id, application, access_level, business_reason, duration):
         employee = self.configuration.employee(employee_id)
-        if employee is None or employee.status != EmployeeStatus.ACTIVE:
-            raise IntakeError("An active employee account is required. Contact IT; no access was granted.")
+        if employee is None:
+            raise IntakeError("Your employee account was not found in the trusted directory. Contact IT to verify your account; no access was granted.")
+        if employee.status != EmployeeStatus.ACTIVE:
+            raise IntakeError("Your employee account is inactive, so this request cannot be processed automatically. Contact IT; no access was granted.")
+        if not isinstance(business_reason, str) or not business_reason.strip():
+            raise IntakeError("Provide a business reason and submit the request again. No access was granted.",
+                              RequestStatus.NEEDS_INFORMATION)
         if any(not isinstance(value, str) or not value.strip()
                for value in (application, access_level, business_reason, duration)):
-            raise IntakeError("Provide application, access level, business reason, and duration. No request was processed.")
-        if access_level not in APPLICATION_ACCESS.get(application, set()):
-            raise IntakeError("Choose a supported application and access level. No request was processed.")
+            raise IntakeError("Provide application, access level, business reason, and duration, then submit again. No access was granted.", RequestStatus.NEEDS_INFORMATION)
+        if application not in APPLICATION_ACCESS:
+            raise IntakeError("The requested application is unsupported. Choose an application from the catalog or contact IT; no access was granted.")
+        if access_level not in APPLICATION_ACCESS[application]:
+            raise IntakeError(f"The requested access level is unsupported for {application}. Choose a listed access level or contact IT; no access was granted.")
         policy = match_policy(self.configuration, employee_id, application, access_level)
-        if policy is None or policy.decision not in (Decision.AUTO_APPROVE, Decision.APPROVAL_REQUIRED, Decision.EXCEPTION_REVIEW):
+        if policy is None:
+            raise IntakeError("No enabled policy matches this request. Contact IT for review and configuration correction; no access was granted.")
+        if policy.decision not in (Decision.AUTO_APPROVE, Decision.APPROVAL_REQUIRED, Decision.EXCEPTION_REVIEW):
             raise IntakeError("This request cannot use automatic provisioning. Contact IT; no access was granted.")
         exception = policy.decision == Decision.EXCEPTION_REVIEW
         # Phase gate only: eligibility and approval decisions still come from CSV.
@@ -57,8 +70,6 @@ class Workflow:
             reviewer = None
             if policy.decision == Decision.APPROVAL_REQUIRED:
                 reviewer = manager_for(self.configuration, employee_id, policy)
-                if reviewer is None:
-                    raise IntakeError("A valid manager could not be resolved. Contact IT; no access was granted.")
             exception = policy.decision == Decision.EXCEPTION_REVIEW
             if exception:
                 reviewer = exception_reviewer_for(self.configuration, employee_id, policy)
@@ -68,14 +79,14 @@ class Workflow:
                 application=application, access_level=access_level, business_reason=business_reason,
                 temporary=False, expires_at=None, created_at=now, updated_at=now,
                 status=(RequestStatus.EXCEPTION_REVIEW if exception else
-                        RequestStatus.PENDING_APPROVAL if reviewer else RequestStatus.APPROVED),
+                        RequestStatus.PENDING_APPROVAL if policy.decision == Decision.APPROVAL_REQUIRED else RequestStatus.APPROVED),
                 assigned_approver_id=reviewer,
             )
             self.database.create(request, policy, event_for(
                 request, policy, "EXCEPTION_DETECTED" if exception else
-                "REQUEST_SUBMITTED" if reviewer else "REQUEST_AUTO_APPROVED", None,
+                "REQUEST_SUBMITTED" if policy.decision == Decision.APPROVAL_REQUIRED else "REQUEST_AUTO_APPROVED", None,
                 "Request is outside normal eligibility; exception review required." if exception else
-                "Request created pending manager approval." if reviewer else "Request created and automatically approved."
+                "Request created pending manager approval." if policy.decision == Decision.APPROVAL_REQUIRED else "Request created and automatically approved."
             ))
             if exception:
                 request = self._record(
@@ -83,13 +94,33 @@ class Workflow:
                     f"Assigned exception reviewer {reviewer}." if reviewer else
                     "Configured exception reviewer could not be resolved; review is blocked.",
                 )
+            elif policy.decision == Decision.APPROVAL_REQUIRED and reviewer is None:
+                request = self._record(request, "APPROVAL_ROUTING_FAILED",
+                                       "Configured manager could not be resolved; review is blocked.")
+        except ConfigurationError:
+            return self._intake_stopped("Policy configuration cannot safely resolve this request. Contact IT for configuration correction; no access was granted.", RequestStatus.REJECTED)
         except IntakeError as error:
-            return stopped(str(error))
+            return self._intake_stopped(str(error), error.status)
         except Exception:
             return stopped("The request could not be recorded safely. Contact IT; no access was granted.")
         if exception:
             return exception_pending(request)
-        return pending(request) if reviewer else self.process(request.request_id)
+        return pending(request) if policy.decision == Decision.APPROVAL_REQUIRED else self.process(request.request_id)
+
+    def _intake_stopped(self, message, status):
+        # Requests require a matched policy. Preserve pre-policy failures in the
+        # existing audit store without inventing employee or policy records.
+        request_id = f"REQ-{uuid4().hex}"
+        try:
+            with self.database.connection:
+                self.database.append_event(AuditEvent(
+                    request_id=request_id, event_type="INTAKE_STOPPED", actor="access_ops",
+                    previous_status=None, new_status=status, timestamp=datetime.now(timezone.utc),
+                    policy_version=None, details=message,
+                ))
+        except Exception:
+            return stopped("The request could not be recorded safely. Contact IT; no access was granted.")
+        return stopped(message, request_id)
 
     def _record(self, request, event_type, details, actor="access_ops", status=None):
         updated = replace(request, status=status or request.status, updated_at=datetime.now(timezone.utc))
@@ -182,9 +213,8 @@ class Workflow:
                                        for e in self.database.events(request_id))):
                         raise IntakeError("Reviewer approval is no longer valid. Contact IT; no access was granted.")
             except Exception:
-                if human:
-                    self._record(request, "REVALIDATION_FAILED", "Current employee, policy, or approval is invalid.",
-                                 status=RequestStatus.REJECTED)
+                self._record(request, "REVALIDATION_FAILED", "Current employee, policy, or approval is invalid.",
+                             status=RequestStatus.REJECTED)
                 raise
             if human:
                 request = self._record(request, "REVALIDATION_SUCCEEDED", "Current employee, policy, and approval validated.")
