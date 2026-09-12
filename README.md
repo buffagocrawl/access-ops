@@ -12,7 +12,7 @@ An agentic natural-language intake architecture is documented for comparison and
 
 ### Implemented behavior
 
-The initial configuration foundation contains synthetic employees and explicit access policies in `config/`. Application code, configuration loading/validation, and tests have not been started; these files do not enforce access decisions yet.
+The configuration foundation contains synthetic employees and explicit access policies in `config/`. The Python package scaffold and pytest import checks are in place. Source modules contain documentation placeholders only; configuration loading/validation and all workflow behavior remain unimplemented. No access decisions are enforced yet.
 
 ### Planned behavior
 
@@ -33,12 +33,31 @@ Slack identity, forms, messages, approval actions, and alerts; employee-director
 
 ```text
 access-ops/
-|-- config/         Synthetic trusted employees and access policies
-├── Planning/       Architecture, scope, blueprint, and implementation decisions
-├── .env.example    Safe local configuration template
-├── .gitignore      Local and generated-file exclusions
-├── README.md       Project overview and status
-└── requirements.txt Dependency placeholder for future implementation
+├── Planning/              Existing architecture and locked scope documents
+├── config/
+│   ├── employees.csv       Existing synthetic trusted directory
+│   └── access_policies.csv Existing policy catalog
+├── src/access_ops/
+│   ├── __init__.py
+│   ├── models.py           Data representations
+│   ├── config.py           CSV loading and validation
+│   ├── policy_engine.py    Deterministic policy evaluation
+│   ├── workflow.py         UI-independent orchestration
+│   ├── approvals.py        Single-reviewer authorization
+│   ├── audit.py            Append-style audit events
+│   ├── database.py         SQLite persistence
+│   ├── notifications.py    Safe Slack-style messages
+│   └── integrations/
+│       ├── __init__.py
+│       └── mock_okta.py    Mock provider boundary
+├── tests/
+│   └── test_imports.py     Scaffold imports only
+├── AGENTS.md               Repository instructions
+├── .env.example            Safe local configuration template
+├── .gitignore              Local and generated-file exclusions
+├── pytest.ini             Test discovery and src import path
+├── README.md              Project overview and setup
+└── requirements.txt       pytest dependency
 ```
 
 ## Development and setup
@@ -58,7 +77,21 @@ access-ops/
 
 These are prototype policy assumptions, not Customer.io policies. Design and Customer Success are configured for future synthetic records without requiring additional employees now. The Blueprint lists several admin roles and UI features; the locked scope limits this foundation to one elevated example (GitHub Admin), with no UI. Unmatched combinations remain manual-review cases, not implicit approvals or implicit exception grants.
 
-Implementation setup instructions will be added when the application structure, dependencies, and runnable commands are established. Until then, there is no application command to run. Future local development is expected to use a Python virtual environment and synthetic/mock data defined by the implementation.
+### Local scaffold checks (Python 3.12)
+
+Reuse the existing `.venv`. If setting up a fresh checkout, create it with a Python 3.12 interpreter (`python -m venv .venv`). From the repository root in PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe --version
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pytest
+```
+
+`pytest.ini` makes `src/` importable during tests and collects tests from `tests/`; no package installation or activation is needed for these commands. SQLite (`sqlite3`) and CSV support use Python's standard library. Streamlit is deferred until the demo interface is built. All future business logic belongs in `src/access_ops/`, independently of Streamlit.
+
+There is no runnable application yet. Models, CSV validation, policy evaluation, approvals, provisioning, SQLite schema, auditing, notifications, retries, duplicate protection, expiration, and revocation are deliberately deferred. The planned `app.py`, `seed.py`, and behavior test modules will be added when their respective implementation phases begin. The `.env.example` paths match the existing configuration, but environment-file loading is not implemented.
+
+The import checks verify the scaffold only. Normal, approval, exception, unauthorized, duplicate, provisioning-failure, expiration, and revocation-failure scenarios still need implementation and behavioral tests before the core prototype can be considered complete.
 
 Do not commit credentials, tokens, passwords, API keys, or local `.env` files. The `.env` file is gitignored; use `.env.example` as the safe template.
 
