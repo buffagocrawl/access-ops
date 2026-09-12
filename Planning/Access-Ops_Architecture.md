@@ -1,4 +1,4 @@
-# AccessFlow Architecture and Approach Comparison
+# Access Ops Architecture and Approach Comparison
 
 **Owner:** Branden Lemire  
 **Project:** Customer.io Technical Generalist take-home  
@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-AccessFlow is a Slack-based workflow for requesting, approving, provisioning, tracking, and expiring software access. The prototype focuses on one narrow vertical slice: an authenticated employee requests access to a supported application, the request is evaluated against configurable policy, any required reviewer approves or denies it, and a mocked Okta adapter changes access in the prototype directory. Every consequential action is validated and audited.
+Access Ops is a Slack-based workflow for requesting, approving, provisioning, tracking, and expiring software access. The prototype focuses on one narrow vertical slice: an authenticated employee requests access to a supported application, the request is evaluated against configurable policy, any required reviewer approves or denies it, and a mocked Okta adapter changes access in the prototype directory. Every consequential action is validated and audited.
 
 Two architectures were considered:
 
@@ -71,7 +71,7 @@ flowchart TB
         OPS["Operations dashboard"]
     end
 
-    subgraph Core["AccessFlow application"]
+    subgraph Core["Access Ops application"]
         API["Intake and approval API"]
         PE["Deterministic policy engine"]
         WF["Workflow and authorization service"]
@@ -346,7 +346,7 @@ The agent improves intake only. Removing the agent must not change the authoriza
 
 ## 7. Decision and Rationale
 
-AccessFlow will implement traditional deterministic automation.
+Access Ops will implement traditional deterministic automation.
 
 The decision is based on three points:
 

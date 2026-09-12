@@ -12,7 +12,7 @@ An agentic natural-language intake architecture is documented for comparison and
 
 ### Implemented behavior
 
-The configuration and data-model layer is implemented using the Python standard library: immutable typed employee, access-policy, access-request, and audit-event records; validated CSV loading; exact employee lookup; and deterministic policy selection. Both original CSV files are preserved. Other source modules remain placeholders. A selected policy describes the configured decision; it does not approve a request or grant access.
+The configuration and data-model layer uses the Python standard library: immutable typed records, validated CSV loading, exact employee lookup, and deterministic policy selection. Both original CSV files are preserved. The first end-to-end workflow now supports an active Engineering employee requesting permanent GitHub Read access under the configured `AUTO_APPROVE` policy, with SQLite request/audit state, a mocked Okta directory, and safe Slack-style feedback. A policy match alone does not authorize provisioning; the workflow enforces validation, revalidation, and the committed audit requirement.
 
 ### Planned behavior
 
@@ -96,7 +96,7 @@ Validation rules:
 
 Use `configuration.employee(slack_user_id)` for exact lookup; unknown IDs return `None`. `match_policy(configuration, slack_user_id, application, access_level)` retrieves trusted employee attributes and refuses unknown or inactive employees. It matches enabled rules by case-sensitive application/access and both department/title selectors. There is no row-order priority or fuzzy matching. One match returns its `AccessPolicy`; zero returns `None`, meaning no policy permission and a future manual-review case. Multiple matches raise `ConfigurationError` defensively even if loading was bypassed.
 
-Matching does not filter by requested duration: later validation must check the selected policy's limits without falling through to another rule. Returning an `AUTO_APPROVE` policy does not change request status. Typed request and audit records are data containers, not validated intake or persisted audit history.
+Matching does not filter by requested duration: the workflow checks the selected policy's `permanent_allowed` flag without falling through to another rule. Temporary durations remain deferred. Returning an `AUTO_APPROVE` policy does not change request status. Typed request and audit records remain data containers; the workflow and database implement validation and persistence.
 
 ### Local checks (Python 3.12)
 
@@ -110,9 +110,53 @@ Reuse the existing `.venv`. If setting up a fresh checkout, create it with a Pyt
 
 `pytest.ini` makes `src/` importable during tests and collects tests from `tests/`; no package installation or activation is needed for these commands. SQLite (`sqlite3`) and CSV support use Python's standard library. Streamlit is deferred until the demo interface is built. All future business logic belongs in `src/access_ops/`, independently of Streamlit.
 
-There is no runnable application yet. Request-field and requested-duration validation, reviewer assignment and authorization, workflow orchestration, approvals, mock Okta, provisioning, SQLite persistence, audit writes, notifications, retries, duplicate-request protection, expiration, revocation, and UI are deliberately deferred. Models describe request and audit data without implementing lifecycle behavior or runtime request validation. The planned `app.py`, `seed.py`, and workflow tests will be added in their respective phases. The `.env.example` paths match the existing configuration, but environment-file loading is not implemented.
+There is no UI or application entry point yet; the golden path is callable through the Python service below. Human approval, exception review, reviewer authorization, denial workflows, temporary access, expiration, revocation, retries, broad duplicate-submission handling, failure-simulation controls, dashboards, and configuration editing remain deferred. Real integrations, external APIs, AI runtime behavior, Docker, and ORM are not implemented. The `.env.example` paths match the existing configuration, but environment-file loading is not implemented.
 
-Tests cover configuration loading and failure cases, employee lookup, all configured policy selections (automatic, approval-required, exception, and rejection), exact matching, disabled rules, ambiguity, and unmatched combinations. End-to-end approval, unauthorized approval, duplicate processing, provisioning-failure, expiration, and revocation-failure scenarios remain deferred; the core prototype is not yet complete.
+Tests cover the existing configuration and policy engine plus the golden-path workflow, committed audit ordering, provider-confirmed activation, persistent idempotency, existing-access outcomes, invalid intake, revalidation, audit failures, and safe handling of unconfirmed provider results. Human approval, reviewer authorization, expiration, and revocation-failure workflows remain deferred; the full core prototype is not yet complete.
+
+### Calling the first vertical slice
+
+With `src` on the Python import path (pytest configures this automatically):
+
+```python
+from access_ops.config import load_configuration
+from access_ops.database import Database
+from access_ops.integrations.mock_okta import MockOkta
+from access_ops.workflow import Workflow
+
+database = Database("access_ops.db")
+provider = MockOkta("mock_okta.db")
+try:
+    workflow = Workflow(load_configuration("config"), database, provider)
+    response = workflow.submit(
+        employee_id="UDEMO001", application="GitHub", access_level="Read",
+        business_reason="Read engineering documentation", duration="Permanent",
+    )
+    print(response.message)
+    print(provider.access_list())
+    # Internal reprocessing uses the persisted request ID, not caller-supplied status.
+    if response.request_id:
+        print(workflow.process(response.request_id).message)
+finally:
+    provider.close()
+    database.close()
+```
+
+Order of operations:
+
+1. Look up the trusted employee and require active status; validate required fields and catalog values.
+2. Use the existing exact policy engine and require `AUTO_APPROVE`. Limit this phase to Engineering/GitHub/Read and policy-permitted `Permanent` duration.
+3. Generate a UUID-based `REQ-...` ID and atomically persist `APPROVED` with `REQUEST_AUTO_APPROVED`. This event records the approval timestamp, policy ID, and version.
+4. Reload the stored request and revalidate against the service's current configuration; require the same policy ID/version.
+5. Commit `PROVISIONING_STARTED` and `PROVISIONING` together. Any audit/transaction error exits before the provider call.
+6. Call the injected `AccessProvider.grant` boundary with the workflow-authorized stored request. The mock only inserts into its local directory; it never evaluates policy or approval.
+7. Only `GRANTED` or `ALREADY_EXISTS` confirms access. Atomically persist `ACTIVE`, the provider result, completion timestamp, and `PROVISIONING_SUCCEEDED`, then return the request ID and mock-access confirmation.
+
+Idempotency has two layers: processing an `ACTIVE` request returns the saved outcome without a provider call or extra audit events; the mock uses a unique employee/application/access tuple and stable `<request_id>:grant` key. An existing tuple returns `ALREADY_EXISTS` without inserting another grant. SQLite preserves both layers across reopening. A new submission creates a new request; broader submission deduplication is deferred.
+
+Assumptions and limits: identity is supplied by trusted local demo code, configuration is a validated in-memory snapshot (reload explicitly to adopt CSV edits), and processing is sequential in one local workflow service. The local SQLite files are trusted application state, not an authentication boundary. Permanent access is the only supported duration because expiration is deferred. Approval and provisioning times are retained in audit history. The combined creation/auto-approval event keeps this slice small.
+
+Unconfirmed provider results use the existing `PROVISIONING_FAILED` state with a fixed safe audit description; no simulation controls or retries are added. If completion persistence fails after a provider grant, state remains `PROVISIONING` with the durable attempt event; the response asks IT to check access and does not claim completion. Reprocessing that state stops. Crash reconciliation, concurrent workers, and automatic recovery are deferred. Raw errors and business reasons are excluded from employee feedback and audit details.
 
 Do not commit credentials, tokens, passwords, API keys, or local `.env` files. The `.env` file is gitignored; use `.env.example` as the safe template.
 
