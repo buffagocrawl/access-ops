@@ -43,6 +43,18 @@ class Database:
     def close(self):
         self.connection.close()
 
+    def request_rows(self):
+        """Read-only operational snapshot, newest requests first."""
+        return [dict(row) for row in self.connection.execute(
+            "SELECT * FROM requests ORDER BY created_at DESC, request_id"
+        ).fetchall()]
+
+    def recent_audit_rows(self, limit=100):
+        """Include audit-only intake failures as well as persisted requests."""
+        return [dict(row) for row in self.connection.execute(
+            "SELECT * FROM audit_events ORDER BY event_id DESC LIMIT ?", (limit,)
+        ).fetchall()]
+
     def create(self, request, policy, event):
         with self.connection:
             self.connection.execute(

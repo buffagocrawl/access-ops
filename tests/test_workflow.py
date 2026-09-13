@@ -101,12 +101,12 @@ def test_existing_access_is_confirmed_without_second_grant(system):
     {"employee_id": "unknown"}, {"employee_id": "UDEMO004"},
     {"employee_id": "UDEMO002"},
     {"employee_id": "UDEMO011", "access_level": "Write"},
-    {"application": "Notion", "access_level": "Standard"},
+    {"application": "Notion", "access_level": "Owner"},
     {"application": "Unknown"}, {"access_level": "Owner"},
     {"duration": "2 days"}, {"duration": ""}, {"business_reason": "  "},
     {"application": ""}, {"access_level": None}, {"business_reason": None},
 ])
-def test_invalid_or_out_of_slice_intake_never_calls_provider(system, monkeypatch, overrides):
+def test_invalid_intake_never_calls_provider(system, monkeypatch, overrides):
     workflow, database, provider = system
     calls = []
     monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))

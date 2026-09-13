@@ -1,5 +1,6 @@
 """Safe local Slack-style employee feedback."""
 from dataclasses import dataclass
+from .models import ApproverType
 
 
 @dataclass(frozen=True)
@@ -21,17 +22,18 @@ def stopped(message, request_id=None):
     return EmployeeResponse(request_id, f"Access Ops: {message}{reference}")
 
 
-def pending(request):
+def pending(request, approver_type=ApproverType.MANAGER):
+    label = "manager" if approver_type == ApproverType.MANAGER else "reviewer"
     if not request.assigned_approver_id:
         return stopped(
-            "Your request is saved pending manager approval, but a valid configured manager could not be resolved. "
+            f"Your request is saved pending {label} approval, but a valid configured {label} could not be resolved. "
             "Review is blocked until the configuration is corrected. Contact IT with this request ID; "
             "no access was granted.", request.request_id,
         )
     return stopped(
-        f"{request.application} {request.access_level} request submitted and pending manager approval "
+        f"{request.application} {request.access_level} request submitted and pending {label} approval "
         f"from <@{request.assigned_approver_id}>. No access has been granted. "
-        "Wait for your manager to review the request.", request.request_id,
+        f"Wait for your {label} to review the request.", request.request_id,
     )
 
 

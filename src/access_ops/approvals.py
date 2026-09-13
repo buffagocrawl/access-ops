@@ -22,3 +22,20 @@ def exception_reviewer_for(configuration, requester_id, policy):
             or reviewer.slack_user_id == requester_id):
         return None
     return reviewer.slack_user_id
+
+
+def reviewer_for(configuration, requester_id, policy):
+    """Resolve the one reviewer required by the configured decision and type."""
+    if policy.decision == Decision.EXCEPTION_REVIEW:
+        return exception_reviewer_for(configuration, requester_id, policy)
+    if policy.decision != Decision.APPROVAL_REQUIRED:
+        return None
+    if policy.approver_type == ApproverType.MANAGER:
+        return manager_for(configuration, requester_id, policy)
+    if policy.approver_type not in (ApproverType.APPLICATION_OWNER, ApproverType.IT_SECURITY):
+        return None
+    reviewer = configuration.employee(policy.approver_id)
+    if (reviewer is None or reviewer.status != EmployeeStatus.ACTIVE
+            or reviewer.slack_user_id == requester_id):
+        return None
+    return reviewer.slack_user_id
