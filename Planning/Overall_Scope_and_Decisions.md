@@ -1,6 +1,6 @@
 # Customer.io Take-Home: Day 1 Scope and Decisions
 
-## Human override / refinement — Day 4 extension
+## Human override / refinement: Day 4 extension
 
 Branden reviewed the initial Day 4 UI and explicitly removed explanatory workflow-step content because architecture documentation already covers it. He prioritized concise demo paths and operational ownership: structured policy editing, current SQLite-backed access management, and human reasons for rejection/manual removal. This is human prioritization, not an invented AI disagreement.
 
@@ -171,7 +171,7 @@ Provisioning failures preserve the approval, mark the request as provisioning fa
 | Invalid request data | Stop and tell the employee what to correct |
 | Missing approver | Pause and route to IT |
 | Authentication failure | Stop and alert IT; do not retry blindly |
-| Duplicate request | Return the existing request |
+| Duplicate submission | A separate request record may be created; provider idempotency prevents a duplicate access grant |
 | Unknown error | Stop safely, preserve context, and alert IT |
 
 AI will not select or perform corrective actions.

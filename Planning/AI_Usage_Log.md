@@ -1,6 +1,6 @@
 # AI Usage Log
 
-## Day 4 extension — human override / refinement
+## Day 4 extension: human override / refinement
 
 - **Tool:** Codex / GPT-6.
 - **Task:** Implemented human-requested operational ownership improvements: structured configuration administration, SQLite-backed current access, rejection reasons, manual removal reasons and confirmation, and UI simplification.
@@ -28,7 +28,7 @@ The tasks below are summaries, not verbatim prompts. Repository commits establis
 | Codex (attribution to confirm) | Build the Streamlit operations interface | Employee Request, Reviewer Inbox, and IT Operations views with UI/service tests (`dadb781`). | Identity selection and notifications are mocks; the UI does not demonstrate production authentication or Slack delivery. | Review to confirm: UI feedback, persisted state, and backend authorization enforcement. | Keep Streamlit as a thin local demonstration interface. |
 | Codex (attribution to confirm) | Verify all five applications | Catalog and UI tests cover GitHub, Figma, Notion, Salesforce, and Snowflake (`dadb781`; `tests/test_catalog_workflow.py`, `tests/test_app.py`). | The earlier GitHub-only workflow did not establish end-to-end support for the full catalog. | Review to confirm: configured approval paths and removal of the GitHub-only restrictions. | Verify configured applications through the shared workflow without bypassing authorization. |
 | Codex (attribution to confirm) | Complete acceptance tests and audit fixes | Acceptance matrix, durable manual-review routing, and actionable mock revocation-failure notifications (`72bd3b0`; `Phase_8_Acceptance_Audit.md`). | The audit records an initial run with 331 passed and one failed: a test incorrectly expected manual review for an explicit reject policy. | The repository records correction of that expectation while preserving rejection behavior. Branden should confirm who identified and changed it. | Explicit rejection remains rejection; a valid request with no matching policy is preserved for manual investigation without granting access. |
-| Codex (attribution to confirm for earlier work) | README and planning-document assistance; draft this usage log | Setup instructions, workflow explanations, architecture comparison, and acceptance evidence; README changes accompany implementation commits. | Stale phase-specific statements remain: README says Streamlit is deferred and normal denial is not added, while later UI documentation and tests cover those behaviors. | Review to confirm: earlier documentation review. Branden must review this disclosure's attribution and unresolved factual details. | Describe implemented behavior and mocks accurately; use the Implementation Contract for build scope. This log does not change other documentation. |
+| Codex (attribution to confirm for earlier work) | README and planning-document assistance; draft this usage log | Setup instructions, workflow explanations, architecture comparison, and acceptance evidence; README changes accompany implementation commits. | Documentation can lag implementation and therefore needs an explicit source-of-truth review. | Review to confirm: earlier documentation review. Branden must review this disclosure's attribution and unresolved factual details. | Describe implemented behavior and mocks accurately; use the Implementation Contract for build scope. This log does not change other documentation. |
 
 ## Where AI helped
 
@@ -50,7 +50,7 @@ Evidence used: [scope and decisions](Overall_Scope_and_Decisions.md), [Blueprint
 
 Codex accelerated implementation, but I retained responsibility for scope, architecture choice, the authorization model, policy semantics, acceptance criteria, testing, and deciding which AI suggestions to accept or reject. I am responsible for reviewing the implementation and this disclosure before submission.
 
-## Day 4 — UI polish and visual review
+## Day 4: UI polish and visual review
 
 | Tool | Task | Useful result | Limitations | Branden review / modification | Final decision |
 | --- | --- | --- | --- | --- | --- |
