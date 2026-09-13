@@ -307,7 +307,7 @@ stateDiagram-v2
 - Standard access may last up to 30 days.
 - Elevated/admin access may last up to 7 days.
 - Longer requests enter IT review.
-- A scheduled process detects expired access.
+- Expiration is detected only when `process_expired_access()` is explicitly invoked; an automatic production scheduler is future-state.
 - Revocation uses the same controlled provisioning adapter.
 - Failed removal produces an immediate IT alert and audit event.
 
@@ -334,15 +334,15 @@ The prototype simulates roles and identity. Production would use company SSO and
 | Failure | Safe behavior |
 |---|---|
 | Missing required field | Set `Needs Information` and ask for the specific value |
-| Unknown application/access | Route to IT review |
+| Unknown application/access | Reject safely with an `INTAKE_STOPPED` audit outcome; do not persist `MANUAL_REVIEW`, which is reserved for otherwise-valid intake with no enabled policy match |
 | Directory unavailable | Pause evaluation; do not authorize |
 | No matching policy | Persist `MANUAL_REVIEW`, notify mock IT for investigation, and authorize nothing |
 | No approver configured | Stop safely, retain the request, and route the issue to IT; no access is authorized |
 | Approval notification fails | Keep `Pending Approval`; retain the request |
 | Unauthorized approval attempt | Reject and audit the action |
-| Duplicate approval click | Return the previously recorded result |
-| Provisioning failure | Set `Provisioning Failed`; retain valid approval and alert IT |
-| Confirmation failure | Keep successful access state; retry only the notification |
+| Duplicate approval/rejection action | Reject and audit the invalid/replayed review action; do not return the prior result as a successful duplicate |
+| Provisioning failure | Set `PROVISIONING_FAILED`; retain valid approval and return local IT guidance; no automatic terminal-failure recovery workflow exists |
+| Provider success followed by completion persistence failure | Do not claim completion; the request can remain `PROVISIONING` and requires manual reconciliation. There is no generic notification retry mechanism |
 | Revocation failure | Set `Revocation Failed` and alert IT immediately |
 | Database write failure | Stop; do not approve or provision without an audit record |
 
