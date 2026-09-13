@@ -37,6 +37,12 @@ class RequestStatus(StrEnum):
     REVOCATION_FAILED = "REVOCATION_FAILED"
 
 
+class RevocationStatus(StrEnum):
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    PENDING = "PENDING"
+    REVOKED = "REVOKED"
+
+
 @dataclass(frozen=True)
 class Employee:
     slack_user_id: str
@@ -79,6 +85,9 @@ class AccessRequest:
     status: RequestStatus = RequestStatus.NEEDS_INFORMATION
     assigned_approver_id: str | None = None
     provisioning_result: str | None = None
+    duration: str = "Permanent"
+    starts_at: datetime | None = None
+    revocation_status: RevocationStatus = RevocationStatus.NOT_APPLICABLE
 
 
 @dataclass(frozen=True)

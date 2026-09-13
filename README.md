@@ -12,7 +12,7 @@ An agentic natural-language intake architecture is documented for comparison and
 
 ### Implemented behavior
 
-The configuration and data-model layer uses the Python standard library: immutable typed records, validated CSV loading, exact employee lookup, and deterministic policy selection. The first end-to-end workflow now supports an active Engineering employee requesting permanent GitHub Read access under the configured `AUTO_APPROVE` policy, with SQLite request/audit state, a mocked Okta directory, and safe Slack-style feedback. A policy match alone does not authorize provisioning; the workflow enforces validation, revalidation, and the committed audit requirement.
+The configuration and data-model layer uses the Python standard library: immutable typed records, validated CSV loading, exact employee lookup, and deterministic policy selection. The first end-to-end workflow now supports an active Engineering employee requesting policy-permitted temporary or permanent GitHub Read access under the configured `AUTO_APPROVE` policy, with SQLite request/audit state, a mocked Okta directory, and safe Slack-style feedback. A policy match alone does not authorize provisioning; the workflow enforces validation, revalidation, and the committed audit requirement.
 
 Engineering GitHub Write uses one configured manager approval. Product GitHub Write enters exception review with one configured application owner, as described below.
 
@@ -98,7 +98,7 @@ Validation rules:
 
 Use `configuration.employee(slack_user_id)` for exact lookup; unknown IDs return `None`. `match_policy(configuration, slack_user_id, application, access_level)` retrieves trusted employee attributes and refuses unknown or inactive employees. It matches enabled rules by case-sensitive application/access and both department/title selectors. There is no row-order priority or fuzzy matching. One match returns its `AccessPolicy`; zero returns `None`, meaning no policy permission and a future manual-review case. Multiple matches raise `ConfigurationError` defensively even if loading was bypassed.
 
-Matching does not filter by requested duration: the workflow checks the selected policy's `permanent_allowed` flag without falling through to another rule. Temporary durations remain deferred. Returning an `AUTO_APPROVE` policy does not change request status. Typed request and audit records remain data containers; the workflow and database implement validation and persistence.
+Matching does not filter by requested duration: the workflow checks the selected policy's `temporary_allowed`, `max_duration_days`, and `permanent_allowed` fields without falling through to another rule or substituting a duration. Returning an `AUTO_APPROVE` policy does not change request status. Typed request and audit records remain data containers; the workflow and database implement validation and persistence.
 
 ### Local checks (Python 3.12)
 
@@ -112,9 +112,9 @@ Reuse the existing `.venv`. If setting up a fresh checkout, create it with a Pyt
 
 `pytest.ini` makes `src/` importable during tests and collects tests from `tests/`; no package installation or activation is needed for these commands. SQLite (`sqlite3`) and CSV support use Python's standard library. Streamlit is deferred until the demo interface is built. All future business logic belongs in `src/access_ops/`, independently of Streamlit.
 
-There is no UI or application entry point yet; the golden path is callable through the Python service below. Exception review, denial workflows, temporary access, expiration, revocation, retries, broad duplicate-submission handling, failure-simulation controls, dashboards, and configuration editing remain deferred. Real integrations, external APIs, AI runtime behavior, Docker, and ORM are not implemented. The `.env.example` paths match the existing configuration, but environment-file loading is not implemented.
+There is no UI or application entry point yet; the golden path is callable through the Python service below. Normal manager denial, retries, broad duplicate-submission handling, failure-simulation controls, dashboards, and configuration editing remain deferred. Real integrations, external APIs, AI runtime behavior, Docker, and ORM are not implemented. The `.env.example` paths match the existing configuration, but environment-file loading is not implemented.
 
-Tests cover the existing configuration and policy engine plus the golden-path workflow, committed audit ordering, provider-confirmed activation, persistent idempotency, existing-access outcomes, invalid intake, revalidation, audit failures, and safe handling of unconfirmed provider results. Expiration and revocation-failure workflows remain deferred; the full core prototype is not yet complete.
+Tests cover the existing configuration and policy engine plus the golden-path workflow, committed audit ordering, provider-confirmed activation, persistent idempotency, existing-access outcomes, invalid intake, revalidation, audit failures, and safe handling of unconfirmed provider results. Explicit revocation-failure simulation remains deferred; the full core prototype is not yet complete.
 
 ### Calling the first vertical slice
 
@@ -179,13 +179,13 @@ print(workflow.approve(response.request_id, reviewer_id="UDEMO005").message)
 
 Configuration remains an immutable in-memory snapshot: trusted calling code must explicitly assign `workflow.configuration = load_configuration("config")` to adopt CSV changes before approval. CSV files are not watched automatically. Reviewer identity is mocked, not authenticated by this service. Processing remains sequential. Existing SQLite databases gain one nullable `assigned_approver_id` column on opening; existing requests are preserved.
 
-Tests cover pending persistence, no provisioning while pending, wrong/self reviewers, correct manager approval, approval audit ordering, revalidation both while pending and after approval, inactive/missing/ineligible requesters, changed policy/manager, unresolved reviewers, and audit failures. Step 12 adds normal permanent Engineering GitHub Write approval. Step 13 extends this machinery for exception review as described next. Temporary access/expiration/revocation, broader invalid-input handling, failure injection, retries, and generalized idempotency remain later work.
+Tests cover pending persistence, no provisioning while pending, wrong/self reviewers, correct manager approval, approval audit ordering, revalidation both while pending and after approval, inactive/missing/ineligible requesters, changed policy/manager, unresolved reviewers, and audit failures. Step 12 adds normal permanent Engineering GitHub Write approval. Step 13 extends this machinery for exception review as described next. Step 15 adds temporary access/expiration/revocation below. Failure injection, retries, and generalized idempotency remain later work.
 
 ### Exception review (Phase 6, Step 13)
 
 Product Manager Paul (`UDEMO002`) requesting GitHub Write matches `GH-WRITE-EXCEPTION` and enters `EXCEPTION_REVIEW`. The CSV assigns Grace, the GitHub owner (`UDEMO006`), directly. Paul's manager is not involved. This preserves the human decision to reject the earlier AI suggestion of a manager plus owner approval chain. The existing policy also covers Sales; no additional exception rules are introduced.
 
-**Duration assumption for this step:** the previous exception CSV row allowed only temporary access, which conflicts with demonstrating provisioning before temporary access is implemented. This step explicitly permits Permanent access on that demo policy and increments its version to 2. Permanent remains the only accepted duration; no duration checks are bypassed. The existing permanent-only SQLite representation reloads requests with `temporary=False` and `expires_at=None`. Temporary duration storage, expiration, and revocation are deferred. Planning documents are unchanged.
+**Historical Step 13 duration assumption:** that slice enabled Permanent on the exception demo policy and incremented its version to 2. Step 15 now supports temporary durations as well, subject to its existing seven-day maximum. Planning documents are unchanged.
 
 ```python
 from access_ops.notifications import exception_review
@@ -202,7 +202,7 @@ print(workflow.approve(response.request_id, reviewer_id="UDEMO006").message)
 # workflow.reject(response.request_id, reviewer_id="UDEMO006")
 ```
 
-The reviewer message uses the saved request's business reason and access level, and identifies the supported Permanent duration. Approval/rejection requires the single assigned, active reviewer, who must still match the configured application owner or IT/Security reviewer. Self-approval, unauthorized decisions, and decisions after completion are rejected and audited. Rejection records `REJECTED` and grants nothing. No normal manager denial workflow is added.
+The reviewer message uses the saved request's business reason and access level, and identifies the persisted requested duration. Approval/rejection requires the single assigned, active reviewer, who must still match the configured application owner or IT/Security reviewer. Self-approval, unauthorized decisions, and decisions after completion are rejected and audited. Rejection records `REJECTED` and grants nothing. No normal manager denial workflow is added.
 
 An unresolved, inactive, or self-referencing exception reviewer leaves a saved `EXCEPTION_REVIEW` request with no assigned approver, records `EXCEPTION_ROUTING_FAILED`, and returns a blocked-review message with the request ID. There is no fallback reviewer or automatic rerouting. Startup CSV validation continues to reject invalid reviewer configuration; the workflow check also handles unavailable reviewers in the current in-memory configuration.
 
@@ -227,4 +227,35 @@ Missing managers now preserve `PENDING_APPROVAL` with no assigned reviewer and `
 
 Revalidation failures now record `REVALIDATION_FAILED` and `REJECTED` for automatic as well as human-approved requests. Existing approval history is retained. Tests cover each invalid outcome, audit persistence and deterministic states, exact matching, blocked managers and exception reviewers, no provider calls, and safe messages on internal errors.
 
-The existing permanent GitHub Read/Write phase limits remain. Temporary access, expiration/revocation, failure-injection controls, retries, generalized idempotency, and blocked-request recovery are intentionally deferred. Planning documents and configuration are unchanged.
+The existing GitHub Read/Write phase limits remain. Step 15 adds temporary access and expiration/revocation below. Failure-injection controls, retries, generalized idempotency, and blocked-request recovery remain deferred. Planning documents and configuration are unchanged.
+
+
+### Phase 6, Step 15: temporary access
+
+The existing GitHub Read/Write and exception paths accept exactly `1 day`, `7 days`, `30 days`, `90 days`, or `Permanent`. Each request must satisfy the matched policy's duration flags and maximum at intake and again before provisioning. No duration is shortened, extended, or substituted. The shipped policies do not permit 90 days; a trusted policy change is required to demonstrate that duration.
+
+Requests persist `duration`, `temporary`, `starts_at`, `expires_at`, and `revocation_status`. Approval waiting time does not consume access time: `GRANTED` sets `starts_at` to the current workflow time, and temporary expiration is that time plus the requested number of 24-hour days. Permanent `ALREADY_EXISTS` confirms access and remains ACTIVE without assigning `starts_at` or `expires_at`. Permanent access has no expiration and `NOT_APPLICABLE` revocation status. Temporary requests begin `PENDING` and finish `REVOKED` after confirmed removal. Additive SQLite migration preserves earlier permanent requests and audit history; old start times remain null rather than being invented.
+
+`Workflow(..., clock=callable)` accepts a timezone-aware clock. `process_expired_access(now=...)` also accepts a timezone-aware instant; both normalize to UTC. Manual processing finds expired ACTIVE temporary requests, validates their stored lifecycle and provisioning evidence, commits `ACCESS_EXPIRED` and `REVOCATION_STARTED`, and removes only the matching employee/application/access/request grant key through Mock Okta. Confirmed removal persists request status `REVOKED` and audits `REVOCATION_SUCCEEDED`. History and timestamps remain available. Later calls ignore the revoked request.
+
+With the workflow/database/provider setup shown above, use a fresh mock directory:
+
+```python
+from datetime import timedelta
+
+response = workflow.submit(
+    employee_id="UDEMO001", application="GitHub", access_level="Read",
+    business_reason="Short documentation review", duration="1 day",
+)
+request = database.get(response.request_id)
+print(request.starts_at, request.expires_at)
+print(provider.access_list())
+print(workflow.process_expired_access(now=request.expires_at + timedelta(seconds=1)))
+print(provider.access_list())
+print(database.get(request.request_id).revocation_status)
+print(database.events(request.request_id))
+```
+
+Assumptions: invoke this local workflow serially. A temporary request receiving `ALREADY_EXISTS` fails closed without a start or expiration, because it did not create its own expiring grant. Expiration uses the stored grant rather than current eligibility policy, so later employee/configuration changes do not prevent removing the original access. An unconfirmed removal remains EXPIRED/PENDING for inspection and is not automatically retried. Crash recovery across provider and workflow databases is not implemented.
+
+Tests cover all five durations, disallowed/unsupported durations, pending approvals and exceptions, execution-time revalidation, expiration boundaries, durable lifecycle/audit records, exact grant targeting, pre-action audit failure, and repeated processing. Step 16 retains explicit failure injection and revocation-failure handling; Step 17 retains provider retries and broader idempotency. No scheduler infrastructure is added.
