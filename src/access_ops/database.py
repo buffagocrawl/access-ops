@@ -1,6 +1,7 @@
 """Small SQLite store for access requests and append-style audit."""
 import sqlite3
-from datetime import datetime
+import json
+from datetime import datetime, timezone
 
 from .models import AccessRequest, AuditEvent, RequestStatus, RevocationStatus
 
@@ -10,6 +11,10 @@ class Database:
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS configuration_audit (
+                event_id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, actor TEXT NOT NULL,
+                policy_id TEXT NOT NULL, outcome TEXT NOT NULL, before_json TEXT, after_json TEXT
+            );
             CREATE TABLE IF NOT EXISTS requests (
                 request_id TEXT PRIMARY KEY, requester_slack_id TEXT NOT NULL,
                 application TEXT NOT NULL, access_level TEXT NOT NULL,
@@ -42,6 +47,19 @@ class Database:
 
     def close(self):
         self.connection.close()
+
+    def config_event(self, policy_id, actor, outcome, before, after):
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO configuration_audit (timestamp, actor, policy_id, outcome, before_json, after_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (datetime.now(timezone.utc).isoformat(), actor, policy_id, outcome,
+                 json.dumps(before, sort_keys=True), json.dumps(after, sort_keys=True)),
+            )
+
+    def configuration_history(self):
+        return [dict(row) for row in self.connection.execute(
+            "SELECT * FROM configuration_audit ORDER BY event_id DESC")]
 
     def request_rows(self):
         """Read-only operational snapshot, newest requests first."""

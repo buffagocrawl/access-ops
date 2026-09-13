@@ -1,5 +1,7 @@
 # Customer.io IT Access Automation Blueprint
 
+**Day 4 human refinement:** Branden authorized reasoned normal/exception rejection, explicit reasoned manual access removal, and structured editing of existing policy rows. The current implementation boundaries are specified in the Day 4 amendment to `Implementation_Contract.md` and `Technical_Design.md`. Process-step explanations remain in documentation and are removed from application pages; the UI focuses on actions, results and ownership. This does not introduce runtime AI, production authentication or real Slack/Okta integrations.
+
 **Owner:** Branden Lemire  
 **Status:** Architecture approved; implementation pending  
 **Selected category:** Software access requests  

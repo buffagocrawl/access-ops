@@ -112,6 +112,13 @@ class MockOkta:
             "ORDER BY employee_id, application, access_level"
         ).fetchall()
 
+    def current_grants(self):
+        """Read the actual SQLite grant owner, not duplicate approval history."""
+        return [dict(zip(("employee_id", "application", "access_level", "grant_key"), row))
+                for row in self.connection.execute(
+                    "SELECT employee_id, application, access_level, grant_key FROM mock_access "
+                    "ORDER BY employee_id, application, access_level")]
+
     def revoke(self, request: AccessRequest) -> bool:
         if self._completed(request, "revoke"):
             return True

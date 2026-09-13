@@ -18,7 +18,7 @@ The local Streamlit UI (`app.py`) passes structured requests and simulated revie
 
 SQLite stores requests and append-style audit history in the workflow database; Mock Okta stores grants and completed operation keys in a separate SQLite database. Manual-review routing and revocation-failure notifications persist in the workflow database's mock inbox. Expiration processing is invoked explicitly through the service API.
 
-See [Access Ops Architecture and Approach Comparison](Planning/Access-Ops_Architecture.md) for the detailed design and agentic alternative. The [Implementation Contract](Planning/Implementation_Contract.md) governs build scope. Broader planning descriptions of authenticated Slack identities, scheduled processing, normal approval denial, delayed retries, and a policy editor are not all implemented; the current boundaries are documented below.
+See [Access Ops Architecture and Approach Comparison](Planning/Access-Ops_Architecture.md) for the detailed design and agentic alternative. The [Implementation Contract](Planning/Implementation_Contract.md), including Branden's Day 4 ownership amendment, governs build scope. Real authenticated identities, scheduling and delayed retries remain future-state. Local policy editing, reasoned reviewer rejection and manual access removal are implemented.
 
 ## Implemented vs mocked vs future-state
 
@@ -73,7 +73,7 @@ access-ops/
 
 `config/employees.csv` is the trusted synthetic directory. All names, Slack IDs, and `example.com` email addresses are demo data, not Customer.io employee information. Department, title, manager, and `active`/`inactive` status must come from this file, never requester input. Olivia is the top-level manager and has no manager herself; requests needing an unavailable manager must stop safely for IT review.
 
-`config/access_policies.csv` contains the five-application catalog. Configuration is intentionally simple enough for a non-technical owner to maintain in Excel or Google Sheets and export as UTF-8 CSV, preserving headers and the conventions below. There is no policy editor UI or audited configuration-change workflow. The loader and matcher use the following conventions:
+`config/access_policies.csv` contains the five-application catalog. Owners should use IT Operations → Configuration to validate and audit supported policy edits. CSV remains the persistent source; direct file edits bypass the UI audit trail and require careful administrative handling. The loader and matcher use the following conventions:
 
 - Match enabled rows by exact application/access level and trusted department/title. Semicolons separate allowed values; `*` means any value in that field. Department and title conditions both apply. `eligible_departments` identifies which employees a row applies to, including exception and rejection rows; it does not itself grant eligibility. There is no row-order precedence. Zero matches on otherwise valid intake route to manual review; multiple matches fail configuration validation or reject intake with IT guidance. Neither authorizes access.
 - `AUTO_APPROVE` and `REJECT` use `approver_type=NONE` and a blank ID. `MANAGER` uses a blank ID because the one reviewer comes from the requester's `manager_slack_id`. `APPLICATION_OWNER` and `IT_SECURITY` each identify exactly one reviewer through `approver_id`. The shared workflow resolves the configured manager, application owner, or IT/security reviewer and prohibits self-approval.
@@ -215,10 +215,10 @@ print(response.message)
 print(exception_review(database.get(response.request_id)).message)
 print(workflow.approve(response.request_id, reviewer_id="UDEMO006").message)
 # Alternatively, while still pending:
-# workflow.reject(response.request_id, reviewer_id="UDEMO006")
+# workflow.reject(response.request_id, reviewer_id="UDEMO006", reason="Launch work was cancelled")
 ```
 
-The reviewer message uses the saved request's business reason and access level, and identifies the persisted requested duration. Approval/rejection requires the single assigned, active reviewer, who must still match the configured application owner or IT/Security reviewer. Self-approval, unauthorized decisions, and decisions after completion are rejected and audited. Rejection records `REJECTED` and grants nothing. No normal manager denial workflow is added.
+The reviewer message uses the saved business reason, access level and duration. Approval/rejection requires the single assigned, active reviewer. Self-review, unauthorized decisions and decisions after completion are rejected and audited. Both normal and exception requests now support rejection with a trimmed nonempty human reason. Rejection rechecks current reviewer authority, records `REJECTED` with reason/actor/timestamp in audit history, and grants nothing.
 
 An unresolved, inactive, or self-referencing exception reviewer leaves a saved `EXCEPTION_REVIEW` request with no assigned approver, records `EXCEPTION_ROUTING_FAILED`, and returns a blocked-review message with the request ID. There is no fallback reviewer or automatic rerouting. Startup CSV validation continues to reject invalid reviewer configuration; the workflow check also handles unavailable reviewers in the current in-memory configuration.
 
@@ -304,13 +304,29 @@ Assumptions remain serial local execution and mocked identity/provider calls. Pr
 
 The app creates `data/workflow.db` and `data/provider.db` by default. Both are gitignored SQLite files and survive reruns and server restarts. Existing `manual_workflow.db` / `manual_okta.db` files are not modified or imported. For isolated demo state, set `$env:ACCESS_OPS_DATA_DIR = "C:\path\to\demo-data"` before starting; the directory uses the same `workflow.db` and `provider.db` filenames. The app reads this environment variable directly; it does not load `.env` or use the older placeholder path variables in `.env.example`.
 
-- **Employee Request:** select a synthetic identity, catalog application/access level, business reason, and duration. Day-based durations mean temporary access. Submit calls `Workflow.submit`; the backend supplies the request reference and safe message. Status labels come from persisted requests/audit outcomes, including audit-only intake failures.
-- **Reviewer Inbox:** all pending approvals and exceptions are visible. Select any synthetic identity to demonstrate authorized, wrong-reviewer, inactive-reviewer, and self-approval attempts. Approve calls `Workflow.approve`; Deny calls `Workflow.reject`. After an action, the inbox refreshes and preserves that action's feedback snapshot.
-- **IT Operations:** read-only tables show requests, actual mock-directory grants, temporary lifecycle fields, failed/exception requests, audit-only intake failures, and the latest 100 audit events. Use Refresh persisted state after external workflow operations. Timestamps are UTC. The app does not run a scheduler or process expiration on reruns; use the existing expiration workflow example above with these database paths.
+- **Employee Request:** four scenario buttons prefill Alice's auto/manager paths, Paul's exception, or Ian's inactive identity above the Mock Slack UI; none submits. Review the fields, then click Submit request. Architecture/process instructions remain in documentation. Submit calls `Workflow.submit`; status feedback comes from persisted requests/audit outcomes.
+- **Reviewer Inbox:** the simulated acting-reviewer list includes only active people with current configured approval authority; it excludes ordinary requesters such as Alice. The inbox then shows only requests assigned to that reviewer. Inspect the request context, then choose Approve or enter a human rejection reason and choose Reject. Backend checks apply to both actions. The action snapshot and reason remain visible after refresh; IT can inspect the durable audit history.
+- **IT Operations:** a read-only console separates manual-review, provisioning-failure, and revocation-failure counts. Filter the request register, select a grid row to inspect its request card and history, or use the inspector selector; expand the actual mock-directory grants, stopped intake, and latest 100 audit events. Use Refresh requests after external workflow operations. Timestamps are UTC. Failure/expiration guidance points to existing harness interfaces; the app does not inject failures, run a scheduler, or process expiration on reruns.
 
 Quick demo: Alice Engineer + GitHub Read auto-approves; Alice + GitHub Write waits for Mike Manager; Paul Product + GitHub Write enters exception review for Grace GitHubOwner. Use Ian FormerEmployee or an empty business reason for validation feedback. For temporary access choose 1 day, 7 days, or 30 days as permitted by policy. All choices remain subject to backend validation.
 
 ## Security and authorization boundaries
+
+### Owner tasks in IT Operations
+
+IT Operations displays **Viewing as Olivia Operations** across Operations, Active Access and Configuration, with no identity selector. Olivia is the fixed local demo owner; employee and reviewer selections do not change IT authority. The workspace checks owner eligibility before displaying operational data or controls, and backend actions still require an active Operations Director or IT Security Analyst in Operations. This is a local demonstration, not production authentication.
+
+**Maintain a policy:** open Configuration, select an existing policy, and edit the supported eligibility, decision, reviewer, duration or enabled fields. Application, access level and policy ID stay fixed. Use `*` alone for any department/title. Click **Validate changes**, inspect the before/after summary, then **Save reviewed changes**. Changing the form requires another validation to replace the reviewed snapshot. Validation errors identify unsupported values, conflicting enabled rules, missing reviewers or inconsistent durations. Save revalidates authority and the complete catalog, rejects stale reviews, and increments the edited policy version. Existing grants and historical request/audit records are not rewritten. Pending provisioning may stop at revalidation after a policy version changes; review it through Operations.
+
+**Remove access:** open Active Access and locate the employee/application. This view reads actual current grants in provider SQLite, joined to the exact original request; it does not list historical approvals as current grants. Overdue access and failed removals remain visible while the provider grant exists. Select the grant, enter a human **Removal reason**, check the explicit confirmation and click **Remove access**. Blank reasons and unconfirmed actions stop. Success removes the grant through mock Okta while retaining request and audit history. Failure remains visible in Operations and records the reason; verify current grants before an explicit retry. Use Request history & reference in Operations to inspect actor, reason, timestamp and outcome.
+
+**Reject a request:** in Reviewer Inbox, choose the authorized acting reviewer, enter a human **Rejection reason**, and click **Reject**. Whitespace-only reasons do not complete rejection. Both normal and exception rejection are supported. Unauthorized reviewers and self-review remain blocked. The response and durable request history include the reason.
+
+Configuration saves append before/after values and outcomes to `configuration_audit` in workflow SQLite. Save intent is durable before replacing the CSV; completion is recorded afterward. Configuration history exposes these records. A completion-audit error can occur after the CSV changed: the UI reports uncertainty, and the owner must inspect current values and history. CSV and SQLite are not one atomic transaction. Use this prototype serially with one operator; revision checks are stale-edit protection, not concurrent-writer locking. Direct CSV edits bypass administrative auditing.
+
+For isolated practice, set both `ACCESS_OPS_DATA_DIR` (new SQLite directory) and `ACCESS_OPS_CONFIG_DIR` (a copied configuration directory) before launching Streamlit. Defaults remain `data/` and `config/`. Practice a harmless duration edit and restore it through the same Validate/Save flow; restoration increments the version again and preserves both audit records. Do not restore by erasing history.
+
+Implemented: local structured policy administration, SQLite-backed current access, deterministic validation and audited reasoned rejection/removal. Mocked: Slack, directory, Okta and acting admin identity. Future-state: production RBAC, real APIs, dual-control change approval where appropriate, and a centralized durable configuration store. Employee editing, policy creation/deletion, arbitrary SQL/JSON editing, bulk import and rollback UI are excluded.
 
 Employee identity and eligibility attributes come from trusted configured employee data. The UI simulates identity by letting the local operator choose an employee or reviewer; there is no authenticated Slack or Okta identity. Requesters cannot supply their own department, manager, employment status, or title through the form.
 
@@ -324,12 +340,12 @@ CSV files, local caller identities, and SQLite files are trusted local inputs, n
 
 - Mock Slack and mock Okta only; synthetic employees, local SQLite, and a local Streamlit UI. No OAuth/SSO, production authentication, cloud deployment, or real approval identities from Slack/Okta.
 - No LLM implementation or natural-language authorization path. The policy catalog is limited to five applications and the configured roles; GitHub Admin is the only elevated example. No hardware, FAQ, offboarding, license purchasing, or general identity-management workflows.
-- Normal human-approval requests can be approved, but their Deny action is rejected by the backend. Denial is implemented only for exceptions. The acceptance tests verify this boundary; they do not prove normal denial support.
+- Normal and exception rejection require the assigned, currently authorized active reviewer and a nonempty reason. There is no AI-generated rejection or removal reason.
 - Duplicate submissions may create distinct request rows; protection prevents duplicate access. Temporary requests that find existing access fail closed rather than invent a new expiration.
-- No approval-wait timeout, expiration scheduler, UI expiration/failure controls, policy editor, or in-place resolution of manual-review/blocked requests. Manual review requires configuration correction and a new request.
-- Serial local processing is assumed. No concurrent/distributed coordination, cross-database atomicity, crash reconciliation, delayed backoff, or recovery after terminal provisioning/revocation failure. A failed completion write after a provider action cannot undo that action.
+- No approval-wait timeout, expiration scheduler, UI failure injection, or in-place resolution of manual-review/blocked requests. Manual review requires configuration correction and a new request. Policy editing and manual removal are available under IT Operations; expiry processing remains an explicitly invoked service operation.
+- Serial local processing is assumed. No concurrent/distributed coordination, cross-database atomicity, crash reconciliation, delayed backoff, automatic recovery after terminal provisioning/revocation failure, or provisioning recovery. A process owner may explicitly retry a failed manual revocation through Active Access after verifying current access; every attempt remains audited. A failed completion write after a provider action cannot undo that action.
 - Persisted mock IT deliveries cover manual review and revocation failure, not every failure or approval event. Delivery errors do not undo committed state; there is no delivery retry mechanism.
-- The UI's generic error styling also appears for some non-error outcomes, including manual review. Read the backend message and persisted state; the label alone does not describe every outcome.
+- Manual review has a distinct warning and operations filter. Employee feedback describes the immediate submission; reviewer feedback is explicitly a snapshot of the last action. Use IT Operations for current persisted state.
 
 ## Demo scenarios
 
@@ -348,7 +364,7 @@ Use a nonempty business reason and a fresh data directory for an independent run
 | Simulated integration failure | In the service setup use `MockOkta("fresh-provider.db", fail_grant=True)` | PROVISIONING_FAILED, retained approval, no grant |
 | Revocation failure | Fresh provider with `fail_revoke=True`; grant 1-day access and invoke expiration | REVOCATION_FAILED, grant retained, persisted actionable mock IT notification |
 
-Expiration and failure simulation use the service snippets above; they have no UI buttons. To inspect service-created state in Streamlit, use its `workflow.db` and `provider.db` paths, run operations serially, and click Refresh persisted state. Use fresh files for temporary examples so existing permanent access does not block the scenario.
+Expiration and failure simulation use the service snippets above. To inspect service-created state in Streamlit, use its `workflow.db` and `provider.db` paths, run operations serially, and click Refresh requests. Active Access also permits explicit reasoned manual removal. Use fresh files for temporary examples so existing permanent access does not block the scenario.
 
 ### Five-application demo
 
@@ -386,4 +402,8 @@ From the repository root:
 
 [Phase 8 acceptance testing](Planning/Phase_8_Acceptance_Audit.md) passed all **15/15 criteria**, with a recorded 334-test full-suite pass. Those criteria evaluate the implemented prototype and mocked boundaries, not production integrations or every broader planning proposal.
 
-Coverage includes normal automatic and human approval, configured exceptions and exception denial, invalid and policy-less intake, unauthorized/self-approval, duplicate access and approval replay, provisioning failure, expiration, revocation failure, committed audit ordering, bounded retries, and persistence across database reopening. `test_catalog_workflow.py` exercises every enabled granting policy; `test_app.py` uses Streamlit AppTest to verify UI/service wiring across all five applications. Tests also verify that normal approval denial remains rejected.
+Coverage includes normal automatic and human approval, reasoned normal/exception rejection, invalid and policy-less intake, unauthorized/self-review, duplicate access and approval replay, provisioning failure, expiration, revocation failure, committed audit ordering, bounded retries, and persistence across database reopening. `test_administration.py` adds owner authorization, exact grant ownership, reasoned manual removal, configuration validation/versioning/audit, and unchanged historical-request checks. `test_app.py` verifies UI/service wiring, prefills and owner workflows.
+
+### Application lifecycle
+
+In **IT Operations > Configuration**, an authorized mocked process owner can validate and save a new application with supported access levels and deterministic policy fields. The local `applications.csv` catalog controls whether an application accepts new requests. Disable requires confirmation, preserves configuration/audit history and never revokes existing access; re-enable validates the stored catalog again. Hard delete, production RBAC, bulk imports and AI-generated configuration remain out of scope.

@@ -490,7 +490,7 @@ def test_exception_approval_commits_audit_before_mock_okta(system, tmp_path, mon
 def test_exception_rejection_is_final_and_persisted(system, tmp_path):
     workflow, database, provider = system
     response = submit_exception(workflow)
-    assert "was rejected" in workflow.reject(response.request_id, "UDEMO006").message
+    assert "was rejected" in workflow.reject(response.request_id, "UDEMO006", "Launch work no longer requires write access").message
     reopened = Database(tmp_path / "workflow.db")
     try:
         assert reopened.get(response.request_id).status == RequestStatus.REJECTED

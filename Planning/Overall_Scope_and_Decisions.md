@@ -1,5 +1,11 @@
 # Customer.io Take-Home: Day 1 Scope and Decisions
 
+## Human override / refinement — Day 4 extension
+
+Branden reviewed the initial Day 4 UI and explicitly removed explanatory workflow-step content because architecture documentation already covers it. He prioritized concise demo paths and operational ownership: structured policy editing, current SQLite-backed access management, and human reasons for rejection/manual removal. This is human prioritization, not an invented AI disagreement.
+
+The Day 4 amendment in `Implementation_Contract.md` supersedes the earlier policy-administration and non-expiration-removal exclusions. Policy configuration remains CSV-backed and deterministically validated; local administrative actions are audited and restricted to active mocked Operations Directors / IT Security Analysts in Operations. Production authentication, external API management, employee editing, general administration and AI decisions remain excluded.
+
 **Decision date:** September 10, 2026  
 **Status:** Locked foundation for architecture and implementation
 
@@ -293,3 +299,6 @@ Use these locked decisions to produce:
 6. Mock-integration plan
 7. Test scenarios
 
+## Application lifecycle refinement
+
+The Configuration surface supports human-directed onboarding plus soft disable/re-enable. A disabled application remains in the local catalog and audit history; disable prevents new intake but does not revoke grants. Hard delete, bulk import, production RBAC and AI configuration decisions remain out of scope.

@@ -1,5 +1,19 @@
 # Access Ops Technical Design
 
+## Day 4 operational ownership extension
+
+The human-approved contract amendment adds a small administrative service and UI without a parallel access-state model. `mock_access` in provider SQLite is authoritative for currently present grants. Its `grant_key` identifies the original request; join that exact request for grant time, temporary duration, expiry and history. Do not infer current access from approval status or duplicate `ALREADY_EXISTS` requests. A passed expiration date does not itself prove removal.
+
+Rejection supports normal and exception pending states and requires a trimmed nonempty reason in service logic. Existing request audit event details persist that reason together with actor, timestamp and outcome; no separate rejection-reason column is needed.
+
+Manual removal validates active mocked process-owner authority, explicit confirmation, reason, allowed source request state, exact provider grant ownership and successful provisioning evidence. Commit a reason-bearing intent before calling the existing `_provider_operation(..., 'revoke')`. Success records REVOKED; failure records REVOCATION_FAILED, keeps the actual grant visible and delivers local IT feedback. Existing request/audit and provider operation histories are retained. No new grant table is introduced.
+
+Policy administration edits existing rows in `access_policies.csv` using structured controls. Identity fields (policy ID, application/access) are fixed. Editable eligibility, decision, reviewer, duration and enabled fields are validated by staging a complete candidate and calling `load_configuration`; additional administration checks reject unknown selectors, invalid exception routing and unresolved manager review. Versions increment automatically. A digest of both directory and policy files protects against stale review/save. Each save reloads authority from current directory data.
+
+One additive `configuration_audit` SQLite table records attempted/rejected/succeeded/failed changes with before/after JSON, actor and UTC timestamp. JSON is internal audit serialization, not an editing interface. Durable intent precedes atomic CSV replacement; completion follows it. This is not a cross-resource transaction or version-control system. An interrupted completion remains visible as intent requiring investigation; no confirmed success is returned without completion audit. Historical requests retain their original policy references and are subject to existing revalidation when provisioning is attempted.
+
+The UI retains Employee Request, Reviewer Inbox and IT Operations at top level. IT Operations uses a simple Operations / Active Access / Configuration selector. Mock labels and concise scenario controls remain; process-step cards are removed. Production RBAC, real Okta APIs, dual control, centralized configuration and rollback remain future-state.
+
 **Status:** Implementation design for the locked prototype contract  
 **Project:** Customer.io IT access-request take-home project
 
@@ -184,3 +198,6 @@ The implementation does not include:
 
 These exclusions preserve the existing scope and architecture decisions. Additional exclusions in the locked planning documents remain in force.
 
+## Application lifecycle
+
+`applications.csv` is the validated local application catalog. It carries the application-level enabled state, while `access_policies.csv` keeps policy-level rules. Local owners create, disable and re-enable through staged, audited configuration actions. Disabling never calls the provider revocation path.

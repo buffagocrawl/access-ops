@@ -56,6 +56,12 @@ class Employee:
 
 
 @dataclass(frozen=True)
+class Application:
+    application: str
+    enabled: bool
+
+
+@dataclass(frozen=True)
 class AccessPolicy:
     policy_id: str
     application: str
