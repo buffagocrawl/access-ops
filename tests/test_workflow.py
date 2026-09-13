@@ -988,8 +988,10 @@ def test_injected_revoke_outcome_preserves_durable_history(system, tmp_path, mon
                                     updated_at=request.expires_at)
             events = reader.events(request.request_id)
             assert events[:len(history)] == history
-            assert [e.event_type for e in events[len(history):]] == [
-                "ACCESS_EXPIRED", "REVOCATION_STARTED", "REVOCATION_FAILED" if fail_revoke else "REVOCATION_SUCCEEDED"]
+            expected = ["ACCESS_EXPIRED", "REVOCATION_STARTED"]
+            expected += (["PROVIDER_ATTEMPT_FAILED", "REVOCATION_FAILED"] if fail_revoke
+                         else ["REVOCATION_SUCCEEDED"])
+            assert [e.event_type for e in events[len(history):]] == expected
             assert events[-1].new_status == saved.status
             assert provider.access_list() == (access if fail_revoke else [])
             if fail_revoke:
@@ -1041,3 +1043,246 @@ def test_revoke_injection_does_not_affect_permanent_access(system, tmp_path):
         assert provider.access_list() == [("UDEMO001", "GitHub", "Read")]
     finally:
         provider.close()
+
+
+# Phase 6, Step 17: bounded retries at the provider boundary.
+
+
+@pytest.mark.parametrize("operation", ["grant", "revoke"])
+@pytest.mark.parametrize("failures,permanent,attempts,success", [
+    (0, False, 1, True), (1, False, 2, True), (2, False, 3, True),
+    (3, False, 3, False), (5, False, 3, False), (0, True, 1, False),
+])
+@pytest.mark.parametrize("employee,reviewer", [("UDEMO001", "UDEMO005"), ("UDEMO002", "UDEMO006")])
+def test_provider_retry_lifecycle(system, tmp_path, monkeypatch, operation, failures, permanent,
+                                  attempts, success, employee, reviewer):
+    from access_ops.integrations.mock_okta import operation_id
+    workflow, database, _ = system
+    provider = MockOkta(tmp_path / "retry.db", **{
+        f"transient_{operation}_failures": failures, f"fail_{operation}": permanent})
+    workflow.provider = provider
+    calls = []
+    original = getattr(provider, operation)
+
+    def observe(request):
+        key = operation_id(request, operation)
+        reader = Database(tmp_path / "workflow.db")
+        try:
+            events = reader.events(request.request_id)
+            if calls:
+                assert events[-1].event_type == "PROVIDER_RETRYING"
+                assert f"{operation} attempt {len(calls) + 1}" in events[-1].details
+            else:
+                assert events[-1].event_type == ("PROVISIONING_STARTED" if operation == "grant" else "REVOCATION_STARTED")
+            assert key in events[-1].details
+        finally:
+            reader.close()
+        calls.append(key)
+        return original(request)
+
+    monkeypatch.setattr(provider, operation, observe)
+    try:
+        response = submit(workflow, employee_id=employee, access_level="Write", duration="1 day")
+        approval = "REQUEST_APPROVED" if employee == "UDEMO001" else "EXCEPTION_APPROVED"
+        response = workflow.approve(response.request_id, reviewer)
+        before = database.get(response.request_id)
+        history = database.events(response.request_id)
+        if operation == "revoke":
+            response = workflow.process_expired_access(before.expires_at)[0]
+        request = database.get(response.request_id)
+        events = database.events(response.request_id)
+        key = f"{response.request_id}:{operation}"
+        assert calls == [key] * attempts
+        assert sum(e.event_type == approval and e.actor == reviewer for e in events) == 1
+        assert sum(e.event_type == "REVALIDATION_SUCCEEDED" for e in events) == 1
+        failed = [e for e in events if e.event_type == "PROVIDER_ATTEMPT_FAILED"]
+        assert len(failed) == (attempts - 1 if success else attempts)
+        for number, event in enumerate(failed, 1):
+            assert key in event.details and f"{operation} attempt {number}" in event.details
+            assert ("non-retryable" if permanent else "transient") in event.details
+        assert sum(e.event_type == "PROVIDER_RETRYING" for e in events) == attempts - 1
+        final_event = ("PROVISIONING_" if operation == "grant" else "REVOCATION_") + ("SUCCEEDED" if success else "FAILED")
+        assert events[-1].event_type == final_event
+        assert key in events[-1].details and f"attempt {attempts}" in events[-1].details
+        assert sum(e.event_type == final_event for e in events) == 1
+        if operation == "grant":
+            assert request.status == (RequestStatus.ACTIVE if success else RequestStatus.PROVISIONING_FAILED)
+            assert provider.access_list() == ([(employee, "GitHub", "Write")] if success else [])
+            workflow.process(request.request_id)
+        else:
+            assert request.status == (RequestStatus.REVOKED if success else RequestStatus.REVOCATION_FAILED)
+            assert request.revocation_status == (RevocationStatus.REVOKED if success else RevocationStatus.PENDING)
+            assert request.starts_at == before.starts_at and request.expires_at == before.expires_at
+            assert events[:len(history)] == history
+            assert provider.access_list() == ([] if success else [(employee, "GitHub", "Write")])
+            assert workflow.process_expired_access(before.expires_at + timedelta(days=1)) == []
+        assert calls == [key] * attempts and database.events(request.request_id) == events
+        if not success:
+            assert "Contact IT" in response.message
+            assert "Simulated" not in response.message and "TransientProviderError" not in response.message
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("operation", ["grant", "revoke"])
+@pytest.mark.parametrize("error", [PermissionError("authentication private-token"),
+                                  PermissionError("authorization private-token"),
+                                  ValueError("invalid input private-token"),
+                                  RuntimeError("configuration private-token")])
+def test_unclassified_provider_errors_are_never_retried(system, monkeypatch, operation, error):
+    workflow, database, provider = system
+    calls = []
+    def fail(request):
+        calls.append(request.request_id)
+        raise error
+    if operation == "revoke":
+        response = submit(workflow, duration="1 day")
+    monkeypatch.setattr(provider, operation, fail)
+    if operation == "grant":
+        response = submit(workflow)
+    else:
+        response = workflow.process_expired_access(database.get(response.request_id).expires_at)[0]
+    assert calls == [response.request_id]
+    events = database.events(response.request_id)
+    assert events[-2].event_type == "PROVIDER_ATTEMPT_FAILED"
+    assert "non-retryable" in events[-2].details
+    assert not any(e.event_type == "PROVIDER_RETRYING" for e in events)
+    assert "private-token" not in response.message
+
+
+@pytest.mark.parametrize("operation", ["grant", "revoke"])
+@pytest.mark.parametrize("event_type", ["PROVIDER_ATTEMPT_FAILED", "PROVIDER_RETRYING"])
+def test_retry_audit_failure_blocks_next_provider_call(system, monkeypatch, operation, event_type):
+    from access_ops.integrations.mock_okta import TransientProviderError
+    workflow, database, provider = system
+    calls = []
+    def fail(request):
+        calls.append(request.request_id)
+        raise TransientProviderError("private-token")
+    if operation == "revoke":
+        response = submit(workflow, duration="1 day")
+    original = database.append_event
+    def fail_audit(event):
+        if event.event_type == event_type:
+            raise TransientProviderError("Even this exception outside the provider must not retry")
+        original(event)
+    monkeypatch.setattr(database, "append_event", fail_audit)
+    monkeypatch.setattr(provider, operation, fail)
+    if operation == "grant":
+        response = submit(workflow)
+    else:
+        response = workflow.process_expired_access(database.get(response.request_id).expires_at)[0]
+    assert calls == [response.request_id]
+    assert database.get(response.request_id).status == (RequestStatus.PROVISIONING if operation == "grant" else RequestStatus.EXPIRED)
+    assert "private-token" not in response.message
+    assert not any(e.event_type == event_type for e in database.events(response.request_id))
+
+
+def test_operation_replay_survives_reopen_and_does_not_touch_replacement_grant(system, tmp_path):
+    workflow, database, provider = system
+    response = submit(workflow, duration="1 day")
+    request = database.get(response.request_id)
+    assert provider.grant(request) == GrantResult.ALREADY_EXISTS
+    assert len(provider.access_list()) == 1
+    workflow.process_expired_access(request.expires_at)
+    reopened = MockOkta(tmp_path / "provider.db")
+    try:
+        assert reopened.revoke(request) is True  # Previously confirmed removal.
+        assert reopened.grant(request) == GrantResult.FAILED  # Never resurrect revoked access.
+        assert reopened.access_list() == []
+        replacement = replace(request, request_id="REQ-replacement")
+        assert reopened.grant(replacement) == GrantResult.GRANTED
+        assert reopened.revoke(request) is True
+        assert reopened.access_list() == [(request.requester_slack_id, "GitHub", "Read")]
+        assert reopened.connection.execute("SELECT grant_key FROM mock_access").fetchone()[0] == "REQ-replacement:grant"
+        assert {row[0] for row in reopened.connection.execute("SELECT operation_id FROM mock_operations")} == {
+            f"{request.request_id}:grant", f"{request.request_id}:revoke", "REQ-replacement:grant"}
+        with pytest.raises(ValueError, match="different access"):
+            reopened.revoke(replace(request, access_level="Write"))
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("operation", ["grant", "revoke"])
+def test_provider_operation_record_and_mutation_are_atomic(system, operation):
+    workflow, database, provider = system
+    response = submit(workflow, duration="1 day")
+    request = database.get(response.request_id)
+    provider.connection.execute("""
+        CREATE TRIGGER fail_operation BEFORE INSERT ON mock_operations
+        BEGIN SELECT RAISE(ABORT, 'private database error'); END
+    """)
+    if operation == "grant":
+        target = replace(request, request_id="REQ-other", access_level="Write")
+    else:
+        target = request
+    before = provider.access_list()
+    with pytest.raises(Exception, match="private database error"):
+        getattr(provider, operation)(target)
+    assert provider.access_list() == before
+    assert provider.connection.execute("SELECT 1 FROM mock_operations WHERE operation_id = ?",
+                                       (f"{target.request_id}:{operation}",)).fetchone() is None
+
+
+@pytest.mark.parametrize("operation", ["grant", "revoke"])
+def test_transient_then_permanent_failure_stops_immediately(system, monkeypatch, operation):
+    from access_ops.integrations.mock_okta import TransientProviderError
+    workflow, database, provider = system
+    calls = []
+    def fail(request):
+        calls.append(request.request_id)
+        if len(calls) == 1:
+            raise TransientProviderError("private timeout")
+        raise PermissionError("private authentication error")
+    if operation == "revoke":
+        response = submit(workflow, duration="1 day")
+    monkeypatch.setattr(provider, operation, fail)
+    if operation == "grant":
+        response = submit(workflow)
+    else:
+        response = workflow.process_expired_access(database.get(response.request_id).expires_at)[0]
+    assert calls == [response.request_id] * 2
+    failures = [e for e in database.events(response.request_id) if e.event_type == "PROVIDER_ATTEMPT_FAILED"]
+    assert "transient" in failures[0].details and "non-retryable" in failures[1].details
+    assert "private" not in response.message
+
+
+def test_already_existing_grant_operation_is_remembered(system):
+    workflow, database, provider = system
+    first = submit(workflow)
+    second = submit(workflow)
+    request = database.get(second.request_id)
+    assert provider.grant(request) == GrantResult.ALREADY_EXISTS
+    assert provider.revoke(database.get(first.request_id)) is True
+    assert provider.grant(request) == GrantResult.FAILED
+    assert provider.access_list() == []
+
+
+@pytest.mark.parametrize("boundary", ["validation", "configuration", "revalidation", "pre_audit"])
+def test_transient_error_outside_provider_never_enters_retry_loop(system, monkeypatch, boundary):
+    from access_ops.integrations.mock_okta import TransientProviderError
+    workflow, database, provider = system
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+    def fail(*args):
+        raise TransientProviderError("private error outside provider")
+    if boundary == "revalidation":
+        response = submit(workflow, access_level="Write")
+        monkeypatch.setattr(workflow, "_validate", fail)
+        response = workflow.approve(response.request_id, "UDEMO005")
+        assert database.events(response.request_id)[-1].event_type == "REVALIDATION_FAILED"
+    else:
+        if boundary == "validation":
+            monkeypatch.setattr(workflow, "_validate", fail)
+        elif boundary == "configuration":
+            monkeypatch.setattr("access_ops.workflow.match_policy", fail)
+        else:
+            original = database.append_event
+            def fail_audit(event):
+                if event.event_type == "PROVISIONING_STARTED":
+                    fail()
+                original(event)
+            monkeypatch.setattr(database, "append_event", fail_audit)
+        response = submit(workflow)
+    assert calls == [] and provider.access_list() == []
+    assert "private" not in response.message

@@ -7,13 +7,14 @@ from .audit import event_for
 from .approvals import manager_for, exception_reviewer_for
 from .config import APPLICATION_ACCESS, Configuration, ConfigurationError
 from .database import Database
-from .integrations.mock_okta import AccessProvider, GrantResult
+from .integrations.mock_okta import AccessProvider, GrantResult, TransientProviderError, operation_id
 from .models import AccessRequest, AuditEvent, ApproverType, Decision, EmployeeStatus, RequestStatus, RevocationStatus
 from .notifications import granted, pending, exception_pending, stopped
 from .policy_engine import match_policy
 
 
 DURATION_DAYS = {"1 day": 1, "7 days": 7, "30 days": 30, "90 days": 90, "Permanent": None}
+MAX_PROVIDER_ATTEMPTS = 3
 
 
 def utc_time(value):
@@ -203,6 +204,34 @@ class Workflow:
             return stopped("Approval stopped safely. Contact IT to check the request state.", request_id)
         return self.process(request_id)
 
+    def _provider_operation(self, request, operation, now=None):
+        """Retry only the provider call; authorization and audit errors stay outside."""
+        key = operation_id(request, operation)
+        failed = GrantResult.FAILED if operation == "grant" else False
+        for attempt in range(1, MAX_PROVIDER_ATTEMPTS + 1):
+            transient = False
+            try:
+                result = getattr(self.provider, operation)(request)
+            except TransientProviderError:
+                result, transient = failed, True
+            except Exception:
+                result = failed
+            confirmed = (isinstance(result, GrantResult) and result in
+                         (GrantResult.GRANTED, GrantResult.ALREADY_EXISTS)) if operation == "grant" else result is True
+            if confirmed:
+                return result, attempt
+            request = self._record(
+                request, "PROVIDER_ATTEMPT_FAILED",
+                f"Operation {key}; {operation} attempt {attempt}; "
+                f"{'transient' if transient else 'non-retryable'} failure.", now=now,
+            )
+            if not transient or attempt == MAX_PROVIDER_ATTEMPTS:
+                return failed, attempt
+            # Commit retry intent before another consequential provider call.
+            request = self._record(request, "PROVIDER_RETRYING",
+                                   f"Operation {key}; {operation} attempt {attempt + 1} of "
+                                   f"{MAX_PROVIDER_ATTEMPTS}.", now=now)
+
     def process(self, request_id):
         """Internal entry point: load persisted state, never accept caller approval."""
         try:
@@ -246,12 +275,10 @@ class Workflow:
                                    updated_at=self._now())
             # This transaction MUST commit before entering the provider boundary.
             self.database.transition(provisioning, event_for(
-                provisioning, policy, "PROVISIONING_STARTED", request.status, "Authorized grant attempt."
+                provisioning, policy, "PROVISIONING_STARTED", request.status,
+                f"Authorized grant attempt 1; operation {operation_id(request, 'grant')}."
             ))
-            try:
-                result = self.provider.grant(provisioning)
-            except Exception:
-                result = GrantResult.FAILED
+            result, attempt = self._provider_operation(provisioning, "grant")
             confirmed = isinstance(result, GrantResult) and result in (GrantResult.GRANTED, GrantResult.ALREADY_EXISTS)
             # Existing access cannot establish a new temporary grant or expiry.
             if request.temporary and result == GrantResult.ALREADY_EXISTS:
@@ -267,7 +294,8 @@ class Workflow:
             )
             self.database.transition(completed, event_for(
                 completed, policy, "PROVISIONING_SUCCEEDED" if confirmed else "PROVISIONING_FAILED",
-                provisioning.status, "Provider confirmed access." if confirmed else "Provider did not confirm access.",
+                provisioning.status, ("Provider confirmed access." if confirmed else "Provider did not confirm access.")
+                + f" Operation {operation_id(request, 'grant')}; grant attempt {attempt}.",
             ))
             if confirmed:
                 return granted(completed)
@@ -280,7 +308,7 @@ class Workflow:
             return stopped("Processing stopped safely. Contact IT to check the access state; do not resubmit.", request_id)
 
     def process_expired_access(self, now=None):
-        """Manually expire stored grants; no scheduler or provider retries."""
+        """Manually expire stored grants with bounded transient provider retries."""
         now = utc_time(now) if now is not None else self._now()
         responses = []
         for request in self.database.active_temporary_requests():
@@ -299,20 +327,20 @@ class Workflow:
                     continue
                 request = self._record(request, "ACCESS_EXPIRED", "Temporary access reached its expiration.",
                                        status=RequestStatus.EXPIRED, now=now)
-                request = self._record(request, "REVOCATION_STARTED", "Removing the stored request grant.", now=now)
-                try:
-                    removed = self.provider.revoke(request)
-                except Exception:
-                    removed = False
+                request = self._record(request, "REVOCATION_STARTED",
+                                       f"Removing the stored request grant; revoke attempt 1; "
+                                       f"operation {operation_id(request, 'revoke')}.", now=now)
+                removed, attempt = self._provider_operation(request, "revoke", now=now)
+                outcome = f" Operation {operation_id(request, 'revoke')}; revoke attempt {attempt}."
                 if removed is not True:
-                    self._record(request, "REVOCATION_FAILED", "Provider did not confirm removal of the stored grant.",
+                    self._record(request, "REVOCATION_FAILED", "Provider did not confirm removal of the stored grant." + outcome,
                                  status=RequestStatus.REVOCATION_FAILED, now=now)
                     responses.append(stopped("Temporary access expired, but removal was not confirmed. "
                                              "Access may remain. Contact IT with this request ID to verify and "
                                              "remove the stored grant; no automatic retry will occur.", request.request_id))
                     continue
                 request = replace(request, revocation_status=RevocationStatus.REVOKED)
-                self._record(request, "REVOCATION_SUCCEEDED", "Provider confirmed removal of the stored grant.",
+                self._record(request, "REVOCATION_SUCCEEDED", "Provider confirmed removal of the stored grant." + outcome,
                              status=RequestStatus.REVOKED, now=now)
                 responses.append(stopped("Temporary access expired and was removed from the mock directory. "
                                          "No further action is needed.", request.request_id))
