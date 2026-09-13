@@ -61,3 +61,38 @@ def exception_review(request):
         f"Business reason: {request.business_reason}. Approve or reject this exception.",
         request.request_id,
     )
+
+
+class MockNotifications:
+    """Local delivery inbox, persisted in the workflow database; no Slack API."""
+
+    def __init__(self, database):
+        self.database = database
+        with database.connection:
+            database.connection.execute("""
+                CREATE TABLE IF NOT EXISTS mock_notifications (
+                    notification_id INTEGER PRIMARY KEY, recipient TEXT NOT NULL,
+                    request_id TEXT NOT NULL, message TEXT NOT NULL
+                )
+            """)
+
+    def send(self, recipient, response):
+        with self.database.connection:
+            self.database.connection.execute(
+                "INSERT INTO mock_notifications (recipient, request_id, message) VALUES (?, ?, ?)",
+                (recipient, response.request_id, response.message),
+            )
+
+    def deliveries(self):
+        return [dict(row) for row in self.database.connection.execute(
+            "SELECT * FROM mock_notifications ORDER BY notification_id"
+        )]
+
+
+def manual_pending(request):
+    return stopped(
+        "No enabled policy matches this request. It is saved for manual IT review and "
+        "configuration correction. Wait for IT Operations; no access was granted. "
+        "Eligibility and duration permissions must be established before a new request can provision.",
+        request.request_id,
+    )

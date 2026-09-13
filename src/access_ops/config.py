@@ -24,6 +24,7 @@ class ConfigurationError(ValueError):
 class Configuration:
     employees: tuple[Employee, ...]
     policies: tuple[AccessPolicy, ...]
+    it_operations_recipient: str = "#it-operations"
 
     def employee(self, slack_user_id: str) -> Employee | None:
         return next((e for e in self.employees if e.slack_user_id == slack_user_id), None)

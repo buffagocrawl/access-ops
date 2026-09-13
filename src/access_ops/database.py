@@ -65,7 +65,7 @@ class Database:
                 (request.request_id, request.requester_slack_id, request.application,
                  request.access_level, request.business_reason, request.created_at.isoformat(),
                  request.updated_at.isoformat(), request.status, request.provisioning_result,
-                 policy.policy_id, policy.policy_version, request.assigned_approver_id,
+                 policy.policy_id if policy else "", policy.policy_version if policy else 0, request.assigned_approver_id,
                  request.duration, request.temporary,
                  request.starts_at.isoformat() if request.starts_at else None,
                  request.expires_at.isoformat() if request.expires_at else None,

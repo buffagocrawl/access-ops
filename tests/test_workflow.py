@@ -112,10 +112,11 @@ def test_invalid_intake_never_calls_provider(system, monkeypatch, overrides):
     monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
     response = submit(workflow, **overrides)
     assert response.request_id is not None
-    assert database.events(response.request_id)[0].event_type == "INTAKE_STOPPED"
+    manual = overrides == {"employee_id": "UDEMO002"}
+    assert database.events(response.request_id)[0].event_type == ("MANUAL_REVIEW_ROUTED" if manual else "INTAKE_STOPPED")
     assert calls == []
     assert provider.access_list() == []
-    assert database.connection.execute("SELECT count(*) FROM requests").fetchone()[0] == 0
+    assert database.connection.execute("SELECT count(*) FROM requests").fetchone()[0] == int(manual)
 
 
 @pytest.mark.parametrize("change", ["disabled", "ambiguous", "human", "duration"])
@@ -284,6 +285,41 @@ def test_manager_approval_commits_revalidation_before_mock_grant(system, tmp_pat
     assert database.events(response.request_id)[-1].event_type == "PROVISIONING_SUCCEEDED"
     assert "Approval rejected" in workflow.approve(response.request_id, "UDEMO005").message
     assert len(observations) == 1
+
+
+@pytest.mark.parametrize("employee,reviewer,approval", [
+    ("UDEMO001", "UDEMO005", "REQUEST_APPROVED"),
+    ("UDEMO002", "UDEMO006", "EXCEPTION_APPROVED"),
+])
+@pytest.mark.parametrize("fail_grant", [False, True])
+def test_duplicate_approval_preserves_outcome_and_history(system, monkeypatch,
+                                                         employee, reviewer, approval, fail_grant):
+    workflow, database, provider = system
+    provider.fail_grant = fail_grant
+    response = submit(workflow, employee_id=employee, access_level="Write", duration="1 day")
+    workflow.approve(response.request_id, reviewer)
+    saved = database.get(response.request_id)
+    history = database.events(response.request_id)
+    access = provider.access_list()
+    assert saved.status == (RequestStatus.PROVISIONING_FAILED if fail_grant else RequestStatus.ACTIVE)
+    assert access == ([] if fail_grant else [(employee, "GitHub", "Write")])
+
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+    workflow.clock = lambda: saved.updated_at + timedelta(seconds=1)
+    result = workflow.approve(response.request_id, reviewer)
+    after = database.get(response.request_id)
+    assert "Approval rejected" in result.message
+    assert result.request_id == response.request_id
+    # Rejected attempts may update the activity timestamp, but no access outcome.
+    assert after == replace(saved, updated_at=workflow.clock())
+    events = database.events(response.request_id)
+    assert events[:len(history)] == history
+    assert [e.event_type for e in events[len(history):]] == ["APPROVAL_ATTEMPTED", "APPROVAL_REJECTED"]
+    assert all(e.actor == reviewer and e.previous_status == saved.status and e.new_status == saved.status
+               for e in events[len(history):])
+    assert sum(e.event_type == approval for e in events) == 1
+    assert calls == [] and provider.access_list() == access
 
 
 @pytest.mark.parametrize("change", ["inactive", "missing", "department", "manager", "policy"])
@@ -653,8 +689,56 @@ def test_missing_or_ambiguous_policy_is_audited_and_closed(system, monkeypatch, 
     assert "configuration correction" in response.message
     assert "No enabled policy" in response.message if mode != "ambiguous" else "Policy configuration" in response.message
     event = database.events(response.request_id)[0]
-    assert event.event_type == "INTAKE_STOPPED" and event.new_status == RequestStatus.REJECTED
+    if mode == "ambiguous":
+        assert event.event_type == "INTAKE_STOPPED" and event.new_status == RequestStatus.REJECTED
+        assert database.get(response.request_id) is None
+    else:
+        assert event.event_type == "MANUAL_REVIEW_ROUTED" and event.new_status == RequestStatus.MANUAL_REVIEW
+        assert database.get(response.request_id).status == RequestStatus.MANUAL_REVIEW
+        assert workflow.notifications.deliveries()[0]["recipient"] == workflow.configuration.it_operations_recipient
     assert event.policy_version is None
+    assert calls == [] and provider.access_list() == []
+
+
+def test_no_policy_match_requires_it_review_without_authorization(system, tmp_path, monkeypatch):
+    workflow, database, provider = system
+    workflow.configuration = replace(workflow.configuration, it_operations_recipient="#configured-it")
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+    response = submit(workflow, employee_id="UDEMO002")
+    assert "saved for manual IT review" in response.message
+    assert "no access was granted" in response.message
+    assert response.request_id in response.message
+    reader = Database(tmp_path / "workflow.db")
+    try:
+        request = reader.get(response.request_id)
+        assert request.status == RequestStatus.MANUAL_REVIEW
+        assert request.assigned_approver_id is None
+        assert request.provisioning_result is None and request.starts_at is None
+        assert reader.policy_reference(request.request_id) == ("", 0)
+        events = reader.events(response.request_id)
+        assert len(events) == 1
+        assert events[0].event_type == "MANUAL_REVIEW_ROUTED"
+        assert events[0].new_status == RequestStatus.MANUAL_REVIEW
+        assert events[0].policy_version is None
+        assert "#configured-it" in events[0].details
+        again = Workflow(workflow.configuration, reader, provider)
+        delivery, = again.notifications.deliveries()
+        assert delivery["recipient"] == "#configured-it"
+        assert delivery["request_id"] == request.request_id
+        assert all(value in delivery["message"] for value in (
+            "UDEMO002", "GitHub", "Read", "Permanent", request.business_reason,
+            "verify eligibility", "cannot authorize provisioning"))
+        assert again.process(request.request_id) == response
+        for reviewer in ("UDEMO002", "UDEMO006", "UDEMO007"):
+            assert "Approval rejected" in again.approve(request.request_id, reviewer).message
+        assert reader.get(request.request_id).status == RequestStatus.MANUAL_REVIEW
+        assert reader.events(request.request_id)[:len(events)] == events
+        assert not any(e.event_type in ("REQUEST_APPROVED", "PROVISIONING_STARTED")
+                       for e in reader.events(request.request_id))
+        assert again.notifications.deliveries() == [delivery]
+    finally:
+        reader.close()
     assert calls == [] and provider.access_list() == []
 
 
@@ -958,6 +1042,7 @@ def test_injected_revoke_outcome_preserves_durable_history(system, tmp_path, mon
     workflow, database, _ = system
     provider = MockOkta(tmp_path / "injected.db", fail_revoke=fail_revoke)
     workflow.provider = provider
+    workflow.configuration = replace(workflow.configuration, it_operations_recipient="#configured-it")
     calls = []
     original = provider.revoke
 
@@ -997,7 +1082,18 @@ def test_injected_revoke_outcome_preserves_durable_history(system, tmp_path, mon
             if fail_revoke:
                 assert "removal was not confirmed" in result[0].message
                 assert "Contact IT" in result[0].message and "no automatic retry" in result[0].message
+                assert result[0].request_id == request.request_id
+                assert request.request_id in result[0].message
+                assert "verify and remove the stored grant" in result[0].message
+                assert f"Operation {request.request_id}:revoke" in events[-1].details
+                assert "Provider did not confirm removal" in events[-1].details
                 assert "was removed" not in result[0].message
+                delivery, = Workflow(workflow.configuration, reader, provider).notifications.deliveries()
+                assert delivery["recipient"] == "#configured-it"
+                assert delivery["request_id"] == request.request_id
+                assert all(value in delivery["message"] for value in (
+                    employee, "GitHub", "Write", f"{request.request_id}:revoke",
+                    "Verify and remove the stored grant", "access may remain", "no automatic retry"))
             else:
                 assert "was removed" in result[0].message
             again = Workflow(workflow.configuration, reader, provider)
@@ -1005,6 +1101,7 @@ def test_injected_revoke_outcome_preserves_durable_history(system, tmp_path, mon
             assert reader.get(request.request_id) == saved
             assert reader.events(request.request_id) == events
             assert calls == [request.request_id]
+            assert len(again.notifications.deliveries()) == int(fail_revoke)
         finally:
             reader.close()
     finally:
@@ -1286,3 +1383,45 @@ def test_transient_error_outside_provider_never_enters_retry_loop(system, monkey
         response = submit(workflow)
     assert calls == [] and provider.access_list() == []
     assert "private" not in response.message
+
+
+def test_manual_review_audit_failure_blocks_routing(system, monkeypatch):
+    workflow, database, provider = system
+    database.connection.execute("""
+        CREATE TRIGGER fail_manual BEFORE INSERT ON audit_events
+        WHEN NEW.event_type = 'MANUAL_REVIEW_ROUTED'
+        BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END
+    """)
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+    response = submit(workflow, employee_id="UDEMO002")
+    assert "could not be recorded safely" in response.message
+    assert response.request_id is None
+    assert database.request_rows() == []
+    assert workflow.notifications.deliveries() == []
+    assert calls == [] and provider.access_list() == []
+
+
+def test_revocation_notification_failure_preserves_committed_failure(system, tmp_path, monkeypatch):
+    workflow, database, provider = system
+    response = submit(workflow, duration="1 day")
+    request = database.get(response.request_id)
+    history = database.events(request.request_id)
+    monkeypatch.setattr(provider, "revoke", lambda request: False)
+
+    def fail_delivery(recipient, response):
+        reader = Database(tmp_path / "workflow.db")
+        try:
+            assert reader.get(request.request_id).status == RequestStatus.REVOCATION_FAILED
+            assert reader.events(request.request_id)[-1].event_type == "REVOCATION_FAILED"
+        finally:
+            reader.close()
+        raise RuntimeError("notification unavailable")
+
+    monkeypatch.setattr(workflow.notifications, "send", fail_delivery)
+    result, = workflow.process_expired_access(request.expires_at)
+    assert "Contact IT" in result.message
+    assert database.get(request.request_id).status == RequestStatus.REVOCATION_FAILED
+    assert database.events(request.request_id)[:len(history)] == history
+    assert provider.access_list() == [("UDEMO001", "GitHub", "Read")]
+    assert workflow.notifications.deliveries() == []
