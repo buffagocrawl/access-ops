@@ -29,7 +29,7 @@ The deterministic architecture will be implemented because software access has p
 - Mocked Okta provisioning and revocation with real prototype state changes
 - Temporary-access expiration
 - Request status, employee/reviewer notifications, and audit history
-- Safe failure handling, controlled retries, and idempotency
+- Safe failure handling, bounded immediate retries for explicitly transient provider failures, and idempotency
 - Operations view with derived read-only request aging and validated CSV configuration
 
 ### Mocked boundaries
@@ -383,7 +383,7 @@ Recommended architecture by request category:
 | Failure | Safe response |
 | --- | --- |
 | Missing required field | Set `Needs Information` and identify the specific missing value |
-| Unknown application or access level | Do not guess; route to IT review |
+| Unknown application or access level | Reject safely and audit `INTAKE_STOPPED`; do not persist `MANUAL_REVIEW`, which is reserved for otherwise-valid intake with no enabled policy match |
 | Directory unavailable | Pause evaluation and authorize nothing |
 | No matching policy | Persist `MANUAL_REVIEW`, notify the mock IT Operations inbox for investigation, and authorize nothing |
 | No approver configured | Stop safely and route the issue to IT; this is separate from the no-policy path |
@@ -392,8 +392,8 @@ Recommended architecture by request category:
 | Duplicate approval | Reject and audit the replay without provisioning again |
 | Transient provider failure | Retry immediately, up to three provider attempts total, using the stable operation key; no delay, backoff, or scheduled retry is implemented |
 | Authentication failure | Stop and alert IT; do not retry blindly |
-| Provisioning failure | Preserve valid approval, mark provisioning failed, and allow controlled retry |
-| Confirmation failure | Preserve successful access state and retry only the notification |
+| Provisioning failure | Preserve valid approval, mark `PROVISIONING_FAILED`, and return local IT guidance; only explicitly transient provider failures receive bounded immediate attempts, with no automatic terminal-failure recovery |
+| Provider success followed by completion persistence failure | Do not claim completion; the request can remain `PROVISIONING` and requires manual reconciliation. Production recovery is future-state; no generic notification retry mechanism exists |
 | Revocation failure | Mark revocation failed and alert IT immediately |
 | Audit persistence failure | Stop before provisioning |
 

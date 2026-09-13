@@ -161,7 +161,7 @@ Required failure cases include:
 - Temporary deprovisioning failure
 - Unexpected internal error
 
-Provisioning failures preserve the approval, mark the request as provisioning failed, notify IT, and allow a controlled retry. Employees are not asked to submit a duplicate request.
+Provisioning failures preserve approval, mark the request `PROVISIONING_FAILED`, and return local IT guidance. Only explicitly transient provider failures receive bounded immediate retry attempts; terminal failures have no automatic recovery workflow. Production recovery/reconciliation is future-state. Employees are not asked to submit a duplicate request.
 
 ## Deterministic Error Handling
 
@@ -190,7 +190,7 @@ AI will not select or perform corrective actions.
 - Applications outside the five-item catalog
 - A policy-administration web application
 
-Unsupported requests will be acknowledged and routed for manual review rather than disappearing silently.
+Unsupported application/access intake is rejected safely with an `INTAKE_STOPPED` audit outcome. Only otherwise-valid intake with no enabled policy match is persisted as `MANUAL_REVIEW` for IT investigation; it cannot authorize access.
 
 ## Discovery Questions
 
@@ -220,7 +220,7 @@ Preferred opening question to the stakeholder:
 - Each request has at most one approver in the prototype.
 - Some low-risk standard requests may be automatically approved.
 - The selected elevated example requires an explicitly configured privileged reviewer and temporary duration.
-- Slack interactions, Okta provisioning, HRIS lookup, IT alerting, and scheduling are mocked but behave through realistic interfaces.
+- Slack interactions, Okta provisioning, HRIS lookup, and supported IT notifications are mocked. Expiration requires explicit invocation of `process_expired_access()`; production scheduling is future-state.
 - An approved request may still fail provisioning and must preserve that distinction.
 - Configuration is maintained in validated CSV files for the prototype.
 - Production policy targets would be established after baseline measurement and a limited pilot.
@@ -267,7 +267,7 @@ No unsupported percentage-improvement targets will be claimed without baseline d
 | Invalid configuration | Validate configuration at startup and fail safely |
 | Approval is replayed | Accept decisions only while a request is pending |
 | Provisioning runs twice | Check existing access and use idempotent operations |
-| Provisioning fails after approval | Preserve approval, mark failure, alert IT, and allow controlled retry |
+| Provisioning fails after approval | Preserve approval, mark failure, and return local IT guidance; only explicitly transient provider failures receive bounded immediate attempts, with no automatic terminal-failure recovery |
 | Temporary access is not removed | Log failure, notify IT, and use fixed retry rules |
 | Slack response exposes sensitive data | Separate safe employee messages from internal technical logs |
 | No policy matches | Never guess; route to manual IT review |

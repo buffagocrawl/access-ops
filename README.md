@@ -28,7 +28,7 @@ SQLite stores requests and append-style audit history in the workflow database; 
 
 See [Access Ops Architecture and Approach Comparison](Planning/Access-Ops_Architecture.md) for the detailed design and agentic alternative. The [Implementation Contract](Planning/Implementation_Contract.md), including Branden's Day 4 ownership amendment, governs build scope. Real authenticated identities, scheduling and delayed retries remain future-state. Local policy editing, reasoned reviewer rejection and manual access removal are implemented.
 
-The handoff set includes the [non-technical maintenance guide](Planning/Maintenance_Guide.md), [project timeline](Planning/Project_Timeline.md), [AI Usage Log](Planning/AI_Usage_Log.md), and [13-area written-submission coverage](Planning/Written_Submission.md). The two architecture diagrams are in [Access Ops Architecture](Planning/Access-Ops_Architecture.md): the selected deterministic component architecture and the documented agentic alternative.
+The handoff set includes the [non-technical maintenance guide](Planning/Maintenance_Guide.md), [project timeline](Planning/Project_Timeline.md), [AI Usage Log](Planning/AI_Usage_Log.md), and [written submission](Planning/Written_Submission.md). The two architecture diagrams are in [Access Ops Architecture](Planning/Access-Ops_Architecture.md): the selected deterministic component architecture and the documented agentic alternative.
 
 ## Implemented vs mocked vs future-state
 
