@@ -834,7 +834,8 @@ def test_expiration_cannot_remove_another_stored_grant(system):
     workflow.process_expired_access(request.expires_at)
     assert provider.access_list()
     assert database.get(request.request_id).revocation_status == RevocationStatus.PENDING
-    assert database.events(request.request_id)[-1].event_type == "REVOCATION_STARTED"
+    assert database.get(request.request_id).status == RequestStatus.REVOCATION_FAILED
+    assert database.events(request.request_id)[-1].event_type == "REVOCATION_FAILED"
 
 
 def test_existing_access_cannot_be_assigned_a_new_expiration(system):
@@ -884,3 +885,159 @@ def test_legacy_database_migration_preserves_permanent_history(system, tmp_path)
         assert reopened.events(response.request_id) == history
     finally:
         reopened.close()
+
+
+# Phase 6, Step 16: explicit deterministic provider failures.
+
+
+@pytest.mark.parametrize("fail_grant", [False, True])
+@pytest.mark.parametrize("employee,level,reviewer,approval", [
+    ("UDEMO001", "Read", None, "REQUEST_AUTO_APPROVED"),
+    ("UDEMO001", "Write", "UDEMO005", "REQUEST_APPROVED"),
+    ("UDEMO002", "Write", "UDEMO006", "EXCEPTION_APPROVED"),
+])
+def test_injected_grant_outcome_and_committed_approval(system, tmp_path, monkeypatch,
+                                                      fail_grant, employee, level, reviewer, approval):
+    workflow, database, _ = system
+    provider = MockOkta(tmp_path / "injected.db", fail_grant=fail_grant)
+    workflow.provider = provider
+    calls = []
+    original = provider.grant
+
+    def observe(request):
+        reader = Database(tmp_path / "workflow.db")
+        try:
+            events = reader.events(request.request_id)
+            assert reader.get(request.request_id).status == RequestStatus.PROVISIONING
+            assert events[-1].event_type == "PROVISIONING_STARTED"
+            assert any(e.event_type == approval and e.new_status == RequestStatus.APPROVED
+                       and e.actor == (reviewer or "access_ops") for e in events)
+            if reviewer:
+                assert events[-2].event_type == "REVALIDATION_SUCCEEDED"
+        finally:
+            reader.close()
+        calls.append(request.request_id)
+        return original(request)
+
+    monkeypatch.setattr(provider, "grant", observe)
+    try:
+        response = submit(workflow, employee_id=employee, access_level=level, duration="1 day")
+        if reviewer:
+            assert calls == []
+            response = workflow.approve(response.request_id, reviewer)
+        reader = Database(tmp_path / "workflow.db")
+        try:
+            request = reader.get(response.request_id)
+            events = reader.events(response.request_id)
+            assert request.status == (RequestStatus.PROVISIONING_FAILED if fail_grant else RequestStatus.ACTIVE)
+            assert events[-1].event_type == ("PROVISIONING_FAILED" if fail_grant else "PROVISIONING_SUCCEEDED")
+            assert any(e.event_type == approval for e in events)
+        finally:
+            reader.close()
+        if fail_grant:
+            assert request.provisioning_result == GrantResult.FAILED
+            assert request.starts_at is None and request.expires_at is None
+            assert provider.access_list() == []
+            assert response.message == (
+                "Access Ops: Approval succeeded, but provisioning failed. Access could not be confirmed. "
+                f"Contact IT with this request ID; do not resubmit. Request ID: {response.request_id}.")
+            workflow.process(response.request_id)
+            assert database.events(response.request_id) == events
+        else:
+            assert request.provisioning_result == GrantResult.GRANTED
+            assert provider.access_list() == [(employee, "GitHub", level)]
+        assert calls == [response.request_id]
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("fail_revoke", [False, True])
+@pytest.mark.parametrize("employee,reviewer", [("UDEMO001", "UDEMO005"), ("UDEMO002", "UDEMO006")])
+def test_injected_revoke_outcome_preserves_durable_history(system, tmp_path, monkeypatch,
+                                                         fail_revoke, employee, reviewer):
+    workflow, database, _ = system
+    provider = MockOkta(tmp_path / "injected.db", fail_revoke=fail_revoke)
+    workflow.provider = provider
+    calls = []
+    original = provider.revoke
+
+    def observe(request):
+        reader = Database(tmp_path / "workflow.db")
+        try:
+            assert reader.get(request.request_id).status == RequestStatus.EXPIRED
+            assert [e.event_type for e in reader.events(request.request_id)][-2:] == [
+                "ACCESS_EXPIRED", "REVOCATION_STARTED"]
+        finally:
+            reader.close()
+        calls.append(request.request_id)
+        return original(request)
+
+    monkeypatch.setattr(provider, "revoke", observe)
+    try:
+        response = submit(workflow, employee_id=employee, access_level="Write", duration="1 day")
+        workflow.approve(response.request_id, reviewer)
+        request = database.get(response.request_id)
+        history = database.events(response.request_id)
+        access = provider.access_list()
+        result = workflow.process_expired_access(request.expires_at)
+        reader = Database(tmp_path / "workflow.db")
+        try:
+            saved = reader.get(request.request_id)
+            assert saved == replace(request, status=(RequestStatus.REVOCATION_FAILED if fail_revoke else RequestStatus.REVOKED),
+                                    revocation_status=(RevocationStatus.PENDING if fail_revoke else RevocationStatus.REVOKED),
+                                    updated_at=request.expires_at)
+            events = reader.events(request.request_id)
+            assert events[:len(history)] == history
+            assert [e.event_type for e in events[len(history):]] == [
+                "ACCESS_EXPIRED", "REVOCATION_STARTED", "REVOCATION_FAILED" if fail_revoke else "REVOCATION_SUCCEEDED"]
+            assert events[-1].new_status == saved.status
+            assert provider.access_list() == (access if fail_revoke else [])
+            if fail_revoke:
+                assert "removal was not confirmed" in result[0].message
+                assert "Contact IT" in result[0].message and "no automatic retry" in result[0].message
+                assert "was removed" not in result[0].message
+            else:
+                assert "was removed" in result[0].message
+            again = Workflow(workflow.configuration, reader, provider)
+            assert again.process_expired_access(request.expires_at + timedelta(days=1)) == []
+            assert reader.get(request.request_id) == saved
+            assert reader.events(request.request_id) == events
+            assert calls == [request.request_id]
+        finally:
+            reader.close()
+    finally:
+        provider.close()
+
+
+def test_revoke_exception_is_durable_and_safe(system, monkeypatch):
+    workflow, database, provider = system
+    response = submit(workflow, duration="1 day")
+    request = database.get(response.request_id)
+
+    def fail(request):
+        raise RuntimeError("Traceback private-token /private/provider.db")
+
+    monkeypatch.setattr(provider, "revoke", fail)
+    result = workflow.process_expired_access(request.expires_at)[0]
+    assert database.get(request.request_id).status == RequestStatus.REVOCATION_FAILED
+    assert database.events(request.request_id)[-1].event_type == "REVOCATION_FAILED"
+    assert provider.access_list()
+    assert all(word not in result.message for word in ("Traceback", "private-token", "/private", "RuntimeError"))
+    assert "Contact IT" in result.message
+
+
+def test_revoke_injection_does_not_affect_permanent_access(system, tmp_path):
+    workflow, database, _ = system
+    provider = MockOkta(tmp_path / "injected.db", fail_revoke=True)
+    workflow.provider = provider
+    try:
+        response = submit(workflow)
+        request = database.get(response.request_id)
+        history = database.events(response.request_id)
+        assert request.status == RequestStatus.ACTIVE
+        assert workflow.process_expired_access(datetime(2100, 1, 1, tzinfo=timezone.utc)) == []
+        assert database.get(response.request_id) == request
+        assert database.events(response.request_id) == history
+        assert provider.access_list() == [("UDEMO001", "GitHub", "Read")]
+    finally:
+        provider.close()

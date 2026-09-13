@@ -23,7 +23,10 @@ class AccessProvider(Protocol):
 
 
 class MockOkta:
-    def __init__(self, path):
+    def __init__(self, path, *, fail_grant=False, fail_revoke=False):
+        # Explicit demo/test failures occur before any directory mutation.
+        self.fail_grant = fail_grant
+        self.fail_revoke = fail_revoke
         self.connection = sqlite3.connect(path)
         self.connection.execute("""
             CREATE TABLE IF NOT EXISTS mock_access (
@@ -38,6 +41,8 @@ class MockOkta:
         self.connection.close()
 
     def grant(self, request: AccessRequest) -> GrantResult:
+        if self.fail_grant:
+            return GrantResult.FAILED
         with self.connection:
             cursor = self.connection.execute(
                 "INSERT INTO mock_access VALUES (?, ?, ?, ?) "
@@ -54,6 +59,8 @@ class MockOkta:
         ).fetchall()
 
     def revoke(self, request: AccessRequest) -> bool:
+        if self.fail_revoke:
+            return False
         with self.connection:
             cursor = self.connection.execute(
                 "DELETE FROM mock_access WHERE employee_id = ? AND application = ? "

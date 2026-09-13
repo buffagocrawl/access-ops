@@ -271,7 +271,8 @@ class Workflow:
             ))
             if confirmed:
                 return granted(completed)
-            return stopped("Access could not be confirmed. Contact IT with this request ID; do not resubmit.", request_id)
+            return stopped("Approval succeeded, but provisioning failed. Access could not be confirmed. "
+                           "Contact IT with this request ID; do not resubmit.", request_id)
         except IntakeError as error:
             return stopped(str(error), request_id)
         except Exception:
@@ -299,8 +300,16 @@ class Workflow:
                 request = self._record(request, "ACCESS_EXPIRED", "Temporary access reached its expiration.",
                                        status=RequestStatus.EXPIRED, now=now)
                 request = self._record(request, "REVOCATION_STARTED", "Removing the stored request grant.", now=now)
-                if self.provider.revoke(request) is not True:
-                    responses.append(stopped("Removal was not confirmed. Contact IT to check the stored grant.", request.request_id))
+                try:
+                    removed = self.provider.revoke(request)
+                except Exception:
+                    removed = False
+                if removed is not True:
+                    self._record(request, "REVOCATION_FAILED", "Provider did not confirm removal of the stored grant.",
+                                 status=RequestStatus.REVOCATION_FAILED, now=now)
+                    responses.append(stopped("Temporary access expired, but removal was not confirmed. "
+                                             "Access may remain. Contact IT with this request ID to verify and "
+                                             "remove the stored grant; no automatic retry will occur.", request.request_id))
                     continue
                 request = replace(request, revocation_status=RevocationStatus.REVOKED)
                 self._record(request, "REVOCATION_SUCCEEDED", "Provider confirmed removal of the stored grant.",
