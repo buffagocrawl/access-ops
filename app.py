@@ -15,7 +15,9 @@ from access_ops.integrations.mock_okta import MockOkta
 from access_ops.workflow import DURATION_DAYS, Workflow
 from access_ops.administration import PolicyAdministration, require_owner
 from access_ops.approvals import configured_reviewer_ids
+from access_ops.sla import DEMO_SLA_HOURS, UNRESOLVED_SLA_STATUSES, format_age, request_age, sla_status
 import admin_ui
+from datetime import datetime, timezone
 
 
 def show_response(response, request, events, *, review=False):
@@ -219,6 +221,13 @@ def render(configuration, database, provider, config_dir=ROOT / "config"):
                                              ["Manual IT review", "Provisioning failed", "Revocation failed"]):
                 with column:
                     st.metric(label, sum(r["status"] == value for r in rows))
+            now = datetime.now(timezone.utc)
+            past_target = sum(
+                r["status"] in UNRESOLVED_SLA_STATUSES
+                and sla_status(datetime.fromisoformat(r["created_at"]), now) == "Past target"
+                for r in rows
+            )
+            st.metric("Past 24h target", past_target)
             focus = st.selectbox("Show requests", ["All requests", "Needs follow-up", "Awaiting reviewer", "Temporary access"], key="ops_filter")
             attention = {"MANUAL_REVIEW", "PROVISIONING_FAILED", "REVOCATION_FAILED", "PROVISIONING", "EXPIRED", "REJECTED"}
             visible = [r for r in rows if focus == "All requests"
@@ -239,6 +248,8 @@ def render(configuration, database, provider, config_dir=ROOT / "config"):
                 row = by_id[selected]
                 ui.status(row["status"])
                 st.subheader(f'{name(row["requester_slack_id"])} → {row["application"]} {row["access_level"]}')
+                age = request_age(datetime.fromisoformat(row["created_at"]), now)
+                st.caption(f"Age: {format_age(age)} · SLA: {sla_status(datetime.fromisoformat(row['created_at']), now)} {DEMO_SLA_HOURS}h demo target")
                 if row["status"] in attention or row["status"] == "EXCEPTION_REVIEW":
                     guidance = {"MANUAL_REVIEW":"No matching policy. IT must investigate eligibility and configuration; this request cannot authorize a grant.",
                                 "PROVISIONING_FAILED":"Grant not confirmed. Investigate the recorded provider result; do not treat approval as successful access.",

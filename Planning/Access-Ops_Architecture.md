@@ -30,7 +30,7 @@ The deterministic architecture will be implemented because software access has p
 - Temporary-access expiration
 - Request status, employee/reviewer notifications, and audit history
 - Safe failure handling, controlled retries, and idempotency
-- Operations view and validated CSV configuration
+- Operations view with derived read-only request aging and validated CSV configuration
 
 ### Mocked boundaries
 
@@ -38,13 +38,13 @@ The deterministic architecture will be implemented because software access has p
 - HRIS/employee directory
 - Okta grants and removals
 - Slack alerts and confirmations
-- Scheduled invocation of expiration processing
+- Expiration processing is explicitly invoked through the local service; no scheduler is implemented
 
 ### Explicitly excluded
 
 - Production OAuth, SSO, Slack signature verification, hosting, and secrets management
 - Hardware/equipment requests and general IT FAQs
-- Service accounts, offboarding, licensing, and unrelated removals
+- Service accounts, offboarding, licensing, and broad/generalized IAM
 - Multiple sequential approvers
 - AI authorization, approval, provisioning, revocation, or autonomous error remediation
 - Applications outside the five-item catalog
@@ -403,7 +403,9 @@ Employee messages explain what happened, the current status, the next step, and 
 
 Routine application, access, eligibility, reviewer, duration, and enabled-status changes are stored as validated CSV records rather than application-specific Python conditionals. A nontechnical IT owner can edit them in Excel or Google Sheets, export CSV, validate the configuration, and review the resulting behavior.
 
-Policy changes remain security-sensitive. Production should replace local CSV and simulated roles with:
+Policy changes remain security-sensitive. Fixed reviewer assignments are trusted prototype configuration. The prototype checks that the configured reviewer exists and is active, but does not independently prove organizational application ownership or security authority. Changing a privileged reviewer—especially the GitHub Admin `IT_SECURITY` reviewer—is a security-sensitive policy change, not cosmetic maintenance. Production should source reviewer authority from an authoritative ownership system or restricted RBAC group and use restricted admin roles, change review/dual control, version history, and rollback.
+
+Production should replace local CSV and simulated roles with:
 
 - A versioned policy datastore and authenticated administration interface
 - Change preview, automated policy tests, approval, audit history, and rollback
@@ -412,6 +414,10 @@ Policy changes remain security-sensitive. Production should replace local CSV an
 - Secrets management, encryption, retention rules, backups, and monitoring
 - A production scheduler for expiration and alerts for failed revocation
 - Shadow mode followed by a low-risk pilot before broader automation
+
+The prototype stores business reasons and displays them to reviewers and mock IT workflows. It does not classify or redact sensitive content automatically. Reasons should contain only the minimum operational context; never include secrets, credentials, API tokens, customer data, or unnecessary personal information. Production needs retention, access-control, classification/redaction, and deletion rules.
+
+Pending approvals have no age-based expiration or SLA deadline. Revalidation protects against changed employee, policy, or reviewer state, but an unchanged request may remain pending indefinitely. Production should define an approval TTL with stakeholders, expire or re-confirm stale context, and surface aging/SLA alerts.
 
 ## 11. Success Measures
 
@@ -425,7 +431,7 @@ Success means safe workload reduction, in this priority order:
 
 Prototype acceptance requires every request to receive an immediate response; required approvals to be enforced; self-approval to fail; successful provisioning to create access; denial to create no access; duplicate processing to remain idempotent; temporary grants to be removed; and all decisions, actions, and failures to be audited.
 
-Production metrics should include time to first response, submission-to-access time, approver latency, automation rate, manual touches, routing accuracy, provisioning success, on-time revocation, employee satisfaction, weekly IT hours saved, and unauthorized provisioning events. Final targets should be set only after measuring the current process and running a controlled pilot.
+The prototype provides durable status/timestamps, pending and failure visibility, audit history, and operational counts. It does not implement SLA definitions, aging thresholds beyond the illustrative 24-hour display target, breach/escalation timers, reminders, or historical SLA reporting. Production metrics should include time to first response, submission-to-access time, approver latency, automation rate, manual touches, routing accuracy, provisioning success, on-time revocation, employee satisfaction, weekly IT hours saved, and unauthorized provisioning events. Establish a baseline, measure a pilot, and set targets only after observing real data.
 
 ## 12. Concise Defense for the Review
 

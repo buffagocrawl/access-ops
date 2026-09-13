@@ -42,7 +42,7 @@ An authenticated mock employee submits a structured access request. The applicat
 
 
 
-The prototype supports exactly five applications:
+The core prototype supports exactly five applications:
 
 
 
@@ -55,6 +55,8 @@ The prototype supports exactly five applications:
 \* Salesforce
 
 \* Snowflake
+
+The Day 4 human-authorized lifecycle amendment below supersedes this core-build restriction only for local application onboarding after the core workflow was complete. The shipped demo/test catalog remains these five applications; a later locally added entry does not turn the prototype into a general IAM platform.
 
 
 
@@ -146,7 +148,7 @@ These features may be added only after the required workflow and tests work reli
 
 
 
-Failure to build these features does not make the prototype incomplete.
+Failure to build these features does not make the prototype incomplete. The Day 4 amendment above supersedes the earlier “nice to have” framing for the implemented local ownership features; it does not expand the core workflow or add production administration.
 
 
 
@@ -185,6 +187,8 @@ Do not implement:
 \* General IT FAQ workflows
 
 \* General-purpose identity-management functionality
+
+The earlier exclusions of local policy administration and unrelated manual access removal are superseded by the Day 4 amendment above. All other exclusions remain effective.
 
 
 

@@ -37,7 +37,7 @@ Document an **agentic natural-language intake design**. An agent could interpret
 
 ## Working Scope
 
-An active employee requests access to one of five supported applications through a structured Slack-style form. Trusted employee attributes and configurable policies determine whether the request is automatically approved, routed to a manager, routed to an application owner, or routed to an IT/security reviewer. An authorized reviewer can approve or deny through a private Slack-style message. Approved access is provisioned in a test application directory through a mocked Okta adapter. Temporary access is automatically removed after expiration. Every action is audited, and failures return useful employee feedback.
+An active employee requests access to one of five supported applications through a structured Slack-style form. Trusted employee attributes and configurable policies determine whether the request is automatically approved, routed to a manager, routed to an application owner, or routed to an IT/security reviewer. An authorized reviewer can approve or deny through a private Slack-style message. Approved access is provisioned in a test application directory through a mocked Okta adapter. Temporary access removal is explicitly invoked through the prototype expiration service after expiration. Every action is audited, and failures return useful employee feedback.
 
 ## Application Catalog
 
@@ -108,7 +108,7 @@ Supported duration options:
 - 90 days
 - Permanent, only when policy permits
 
-Temporary access records an access start, expiration, and deprovisioning status. A mocked scheduled process finds expired access, removes it through the mocked Okta adapter, logs the result, and informs the employee. The demo may advance a mock clock or invoke the expiration process directly.
+Temporary access records an access start, expiration, and deprovisioning status. A local expiration service finds expired access when explicitly invoked, removes it through the mocked Okta adapter, logs the result, and informs the employee. The demo may advance a mock clock or invoke the expiration process directly; no scheduler runs it automatically.
 
 One narrowly defined elevated-access example will be included. It must be explicitly configured, approved by the configured privileged-access reviewer, time-limited, ineligible for self-approval, and fully audited.
 
@@ -179,7 +179,7 @@ AI will not select or perform corrective actions.
 ## Explicit Exclusions
 
 - Service accounts
-- Access removal unrelated to temporary-access expiration
+- Access removal unrelated to temporary-access expiration (superseded by the Day 4 amendment below; narrow reasoned manual removal is implemented)
 - Employee offboarding
 - License purchasing or capacity management
 - Multiple sequential approvers

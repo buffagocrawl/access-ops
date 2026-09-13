@@ -4,6 +4,14 @@
 
 Access Ops is a local Customer.io interview take-home prototype for software access requests only. It addresses the manual intake, routing, approval, provisioning, expiration, and audit work that can surround employee access requests.
 
+## Core vertical slice vs. post-core ownership extensions
+
+**Core workflow:** structured software-access intake; trusted employee lookup; deterministic policy evaluation; auto-approval; one human approval; configured exception review; policy-less manual review; mock provisioning; audit history; temporary access and revocation; deterministic failure handling; and tests.
+
+**Post-core / Day 4 ownership extensions:** local policy administration; application add/disable/re-enable; current-access view; reasoned manual access removal; and UI/usability polish. The core workflow was completed and tested first; these features were added afterward and are not necessary to understand the central architecture decision. They are narrow local operations, not a general IAM platform. Production authentication, lifecycle automation, offboarding, generalized IAM, and broad administration remain out of scope.
+
+The shipped demo catalog starts with five applications: GitHub, Figma, Notion, Salesforce, and Snowflake. The later local lifecycle extension can add a catalog entry for demonstration or maintenance; this is a Day 4 amendment to the original “exactly five” core constraint, not a general-purpose catalog promise.
+
 ## Why deterministic automation
 
 The narrow scope is software access requests through a Slack-style structured workflow. The selected implementation approach is deterministic, traditional automation: trusted employee attributes and human-readable policy configuration drive repeatable validation, routing, approval, provisioning, and revocation decisions.
@@ -47,6 +55,7 @@ access-ops/
 |-- Planning/               Architecture, locked scope, and Phase 8 acceptance audit
 |-- config/
 |   |-- employees.csv       Synthetic trusted directory
+|   |-- applications.csv    Application lifecycle catalog
 |   `-- access_policies.csv Five-application policy catalog
 |-- src/access_ops/
 |   |-- models.py           Typed data records
@@ -57,9 +66,13 @@ access-ops/
 |   |-- audit.py            Audit event construction
 |   |-- database.py         SQLite request/audit persistence
 |   |-- notifications.py    Local responses and persisted mock IT deliveries
+|   |-- administration.py   Policy/application ownership operations
+|   |-- sla.py              Derived request-aging display helper
 |   `-- integrations/mock_okta.py  Mock grants, revocation, and operation keys
 |-- tests/                  Configuration, policy, workflow, catalog, and UI tests
 |-- app.py                  Local Streamlit entry point
+|-- admin_ui.py             Operations ownership controls
+|-- ui.py                   Shared presentation helpers
 |-- data/                   Generated local SQLite files (gitignored)
 |-- AGENTS.md               Repository instructions
 |-- .env.example            Placeholder template; not loaded by the app
@@ -117,7 +130,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Dependencies are pytest and Streamlit; SQLite and CSV support use Python's standard library. No external credentials are required. `.env.example` contains older placeholder paths; neither the application nor service loads `.env`.
+Dependencies are pytest and Streamlit; SQLite and CSV support use Python's standard library. No external credentials are required. `.env.example` is a safe local template showing the current configuration paths; the application and service do not load `.env`.
 
 ## Run instructions
 
@@ -304,11 +317,22 @@ Assumptions remain serial local execution and mocked identity/provider calls. Pr
 
 ## Local Streamlit demo
 
-The app creates `data/workflow.db` and `data/provider.db` by default. Both are gitignored SQLite files and survive reruns and server restarts. Existing `manual_workflow.db` / `manual_okta.db` files are not modified or imported. For isolated demo state, set `$env:ACCESS_OPS_DATA_DIR = "C:\path\to\demo-data"` before starting; the directory uses the same `workflow.db` and `provider.db` filenames. The app reads this environment variable directly; it does not load `.env` or use the older placeholder path variables in `.env.example`.
+The app creates `data/workflow.db` and `data/provider.db` by default. Both are gitignored SQLite files and survive reruns and server restarts. Existing `manual_workflow.db` / `manual_okta.db` files are not modified or imported. For isolated demo state, set `$env:ACCESS_OPS_DATA_DIR = "C:\path\to\demo-data"` before starting; the directory uses the same `workflow.db` and `provider.db` filenames. The app reads this environment variable directly; it does not load `.env`.
 
 - **Employee Request:** four scenario buttons prefill Alice's auto/manager paths, Paul's exception, or Ian's inactive identity above the Mock Slack UI; none submits. Review the fields, then click Submit request. Architecture/process instructions remain in documentation. Submit calls `Workflow.submit`; status feedback comes from persisted requests/audit outcomes.
 - **Reviewer Inbox:** the simulated acting-reviewer list includes only active people with current configured approval authority; it excludes ordinary requesters such as Alice. The inbox then shows only requests assigned to that reviewer. Inspect the request context, then choose Approve or enter a human rejection reason and choose Reject. Backend checks apply to both actions. The action snapshot and reason remain visible after refresh; IT can inspect the durable audit history.
-- **IT Operations:** a read-only console separates manual-review, provisioning-failure, and revocation-failure counts. Filter the request register, select a grid row to inspect its request card and history, or use the inspector selector; expand the actual mock-directory grants, stopped intake, and latest 100 audit events. Use Refresh requests after external workflow operations. Timestamps are UTC. Failure/expiration guidance points to existing harness interfaces; the app does not inject failures, run a scheduler, or process expiration on reruns.
+- **IT Operations:** a read-only console separates manual-review, provisioning-failure, revocation-failure, and unresolved requests past the illustrative 24-hour target. Each request shows derived age and SLA status from its persisted UTC creation timestamp. This is visibility only; the app does not inject failures, run a scheduler, or process expiration on reruns.
+
+### Reset local demo state
+
+Stop Streamlit first, then delete only the generated SQLite files below. Never delete configuration, source, or test files. The app recreates these files on restart.
+
+```powershell
+Remove-Item .\data\workflow.db -ErrorAction SilentlyContinue
+Remove-Item .\data\provider.db -ErrorAction SilentlyContinue
+
+.\.venv\Scripts\python.exe -m streamlit run app.py --server.address 127.0.0.1 --browser.gatherUsageStats false
+```
 
 Quick demo: Alice Engineer + GitHub Read auto-approves; Alice + GitHub Write waits for Mike Manager; Paul Product + GitHub Write enters exception review for Grace GitHubOwner. Use Ian FormerEmployee or an empty business reason for validation feedback. For temporary access choose 1 day, 7 days, or 30 days as permitted by policy. All choices remain subject to backend validation.
 
@@ -348,6 +372,13 @@ CSV files, local caller identities, and SQLite files are trusted local inputs, n
 - Serial local processing is assumed. No concurrent/distributed coordination, cross-database atomicity, crash reconciliation, delayed backoff, automatic recovery after terminal provisioning/revocation failure, or provisioning recovery. A process owner may explicitly retry a failed manual revocation through Active Access after verifying current access; every attempt remains audited. A failed completion write after a provider action cannot undo that action.
 - Persisted mock IT deliveries cover manual review and revocation failure, not every failure or approval event. Delivery errors do not undo committed state; there is no delivery retry mechanism.
 - Manual review has a distinct warning and operations filter. Employee feedback describes the immediate submission; reviewer feedback is explicitly a snapshot of the last action. Use IT Operations for current persisted state.
+- Pending approvals do not currently have an age-based expiration or SLA deadline. Revalidation protects against changed employee, policy, or reviewer state, but an unchanged request may remain pending indefinitely. The Operations view provides read-only aging against a single illustrative 24-hour demo target; it does not enforce that target. Production should define an approval TTL with IT stakeholders, re-confirm or expire stale business context, and surface aging/SLA alerts.
+- The prototype stores business reasons and displays them to reviewers and mock IT workflows. It does not classify or redact sensitive content automatically. Use only the minimum operational context; never include secrets, credentials, API tokens, customer data, or unnecessary personal information. Production needs data classification, access controls, retention, and deletion rules.
+- Reviewer IDs are trusted prototype policy configuration. The prototype verifies that a configured reviewer exists and is active, but does not independently prove organizational application ownership or security authority. Changing a privileged reviewer, especially the GitHub Admin `IT_SECURITY` reviewer, is security-sensitive; production should use authoritative ownership/RBAC data and stronger change governance such as restricted admin roles, review/dual control, version history, and rollback.
+
+### SLA visibility boundary
+
+Implemented: persisted request timestamps, read-only request aging, and one illustrative 24-hour target in IT Operations. Not implemented: stakeholder-approved SLA policy, request-type targets, business-hours calculations, reminders, automated escalation, approval expiration, SLA enforcement, or historical SLA analytics. The 24-hour target is a prototype assumption for demonstrating SLA visibility. It is not a Customer.io policy.
 
 ## Demo scenarios
 
@@ -400,9 +431,9 @@ From the repository root:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-`pytest.ini` adds `src/` to the test import path and collects `tests/`. Final documentation QA on September 13, 2026 passed: **403 passed, 0 failed** in 60.42 seconds.
+`pytest.ini` adds `src/` to the test import path and collects `tests/`. Final documentation QA on September 13, 2026 passed: **408 passed, 0 failed**.
 
-[Phase 8 acceptance testing](Planning/Phase_8_Acceptance_Audit.md) passed all **15/15 criteria** in its recorded run. The final documentation-QA suite passed 403 tests. Those criteria evaluate the implemented prototype and mocked boundaries, not production integrations or every broader planning proposal.
+[Phase 8 acceptance testing](Planning/Phase_8_Acceptance_Audit.md) passed all **15/15 criteria** in its recorded run. The final documentation-QA suite passed 408 tests. Those criteria evaluate the implemented prototype and mocked boundaries, not production integrations or every broader planning proposal.
 
 Coverage includes normal automatic and human approval, reasoned normal/exception rejection, invalid and policy-less intake, unauthorized/self-review, duplicate access and approval replay, provisioning failure, expiration, revocation failure, committed audit ordering, bounded retries, and persistence across database reopening. `test_administration.py` adds owner authorization, exact grant ownership, reasoned manual removal, configuration validation/versioning/audit, and unchanged historical-request checks. `test_app.py` verifies UI/service wiring, prefills and owner workflows.
 
