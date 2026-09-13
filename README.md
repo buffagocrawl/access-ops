@@ -10,9 +10,13 @@ An agentic natural-language intake architecture is documented for comparison and
 
 ## Status and behavior boundaries
 
+The phase-by-phase notes below retain implementation history. The five-application catalog fix at the end supersedes earlier GitHub-only phase limits.
+
+Phase 7 adds a thin Streamlit demo with Employee Request, Reviewer Inbox, and IT Operations tabs. See the local launch instructions and current backend limitations below.
+
 ### Implemented behavior
 
-The configuration and data-model layer uses the Python standard library: immutable typed records, validated CSV loading, exact employee lookup, and deterministic policy selection. The first end-to-end workflow now supports an active Engineering employee requesting policy-permitted temporary or permanent GitHub Read access under the configured `AUTO_APPROVE` policy, with SQLite request/audit state, a mocked Okta directory, and safe Slack-style feedback. A policy match alone does not authorize provisioning; the workflow enforces validation, revalidation, and the committed audit requirement.
+The configuration and data-model layer uses the Python standard library: immutable typed records, validated CSV loading, exact employee lookup, and deterministic policy selection. The shared workflow supports every granting policy in the five-application configuration, with SQLite request/audit state, a mocked Okta directory, and safe Slack-style feedback. A policy match alone does not authorize provisioning; the workflow enforces validation, revalidation, and the committed audit requirement.
 
 Engineering GitHub Write uses one configured manager approval. Product GitHub Write enters exception review with one configured application owner, as described below.
 
@@ -73,13 +77,13 @@ access-ops/
 `config/access_policies.csv` contains the five-application catalog. The loader and matcher use the following conventions:
 
 - Match enabled rows by exact application/access level and trusted department/title. Semicolons separate allowed values; `*` means any value in that field. Department and title conditions both apply. `eligible_departments` identifies which employees a row applies to, including exception and rejection rows; it does not itself grant eligibility. There is no row-order precedence. Zero or multiple matches must authorize nothing and require IT review.
-- `AUTO_APPROVE` and `REJECT` use `approver_type=NONE` and a blank ID. `MANAGER` uses a blank ID because the one reviewer comes from the requester's `manager_slack_id`. `APPLICATION_OWNER` and `IT_SECURITY` each identify exactly one reviewer through `approver_id`. The Engineering GitHub Write workflow checks manager availability and prohibits self-approval; other review paths remain deferred.
+- `AUTO_APPROVE` and `REJECT` use `approver_type=NONE` and a blank ID. `MANAGER` uses a blank ID because the one reviewer comes from the requester's `manager_slack_id`. `APPLICATION_OWNER` and `IT_SECURITY` each identify exactly one reviewer through `approver_id`. The shared workflow resolves the configured manager, application owner, or IT/security reviewer and prohibits self-approval.
 - Booleans are `true`/`false`. `max_duration_days` caps temporary access only; permanent access requires `permanent_allowed=true`. Rejection rows allow neither and use a zero-day limit. Standard temporary access is capped at 30 days, GitHub exceptions and Admin at 7 days. A 90-day request is not authorized by these rows. Duration failures must not fall through to a more permissive rule.
 - `policy_version` starts at `1` and should increase when a row changes. `eligible_titles` preserves the Blueprint's explicit Engineering-leadership restriction on GitHub Admin; other rows use `*`, so titles do not otherwise imply trust.
 - Alice demonstrates Engineering GitHub Read auto-approval and Write manager approval. Paul and Sarah demonstrate temporary GitHub Write exception review directly by Grace. Mike demonstrates temporary GitHub Admin review by Ivan. Farah demonstrates an explicit GitHub Write rejection. Ian provides an inactive-employee negative case that must be blocked before policy evaluation.
-- Figma View and Notion Standard are automatic for active employees; Figma Editor is automatic for Product/Design. Salesforce Standard requires the Sales/Customer Success employee's manager. Snowflake Read requires the Data/Engineering employee's manager; Write requires Dana and is temporary only. Standard non-rejection rows permit permanent access except Snowflake Write and the GitHub exception/Admin rows.
+- Figma View and Notion Standard are automatic for active employees; Figma Editor is automatic for Product/Design. Salesforce Standard requires the Sales/Customer Success employee's manager. Snowflake Read requires the Data/Engineering employee's manager; Write requires Dana and is temporary only. Non-rejection rows permit permanent access except Snowflake Write and GitHub Admin; the existing GitHub exception row permits permanent access.
 
-These are prototype policy assumptions, not Customer.io policies. Design and Customer Success are configured for future synthetic records without requiring additional employees now. The Blueprint lists several admin roles and UI features; the locked scope limits this foundation to one elevated example (GitHub Admin), with no UI. Unmatched combinations remain manual-review cases, not implicit approvals or implicit exception grants.
+These are prototype policy assumptions, not Customer.io policies. Design and Customer Success are configured for future synthetic records without requiring additional employees now. The Blueprint lists several admin roles and UI features; the locked scope limits this foundation to one elevated example (GitHub Admin), with the simple Phase 7 demo UI. Unmatched combinations remain manual-review cases, not implicit approvals or implicit exception grants.
 
 ### Configuration startup boundary
 
@@ -295,3 +299,71 @@ provider = MockOkta("provider.db", fail_grant=True, fail_revoke=True)
 Counts default to zero and must be nonnegative integers. They apply independently per operation ID within a mock instance; reopening resets simulated attempt counts but preserves completed operations. Completed-operation checks precede failure injection; permanent failure flags take precedence over transient injection for new operations. A count of three or more exhausts the workflow limit. After terminal `PROVISIONING_FAILED` or `REVOCATION_FAILED`, subsequent workflow processing does not start another attempt budget. Revocation failure retains `PENDING` removal status and safe IT guidance. No failure classification or raw exception text is exposed to employees.
 
 Assumptions remain serial local execution and mocked identity/provider calls. Production concerns left out include concurrent/distributed coordination, crash reconciliation between workflow and provider databases, durable scheduling/backoff, real provider error mapping, and operational alert delivery. Existing temporary `ALREADY_EXISTS` handling remains conservative: it does not infer a new start time or expiration. This step does not add broad duplicate-submission detection or recovery for blocked approvals.
+
+## Phase 7: local Streamlit demo
+
+From PowerShell in the repository root (Python 3.11+):
+
+```powershell
+# Only needed if .venv does not exist:
+python -m venv .venv
+
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m streamlit run app.py --server.address 127.0.0.1 --browser.gatherUsageStats false
+```
+
+Open http://localhost:8501. Stop the server with Ctrl+C.
+
+The app creates `data/workflow.db` and `data/provider.db` by default. Both are gitignored SQLite files and survive reruns and server restarts. Existing `manual_workflow.db` / `manual_okta.db` files are not modified or imported. For isolated demo state, set `$env:ACCESS_OPS_DATA_DIR = "C:\path\to\demo-data"` before starting; the directory uses the same `workflow.db` and `provider.db` filenames. The app reads this environment variable directly; it does not load `.env` or use the older placeholder path variables in `.env.example`.
+
+- **Employee Request:** select a synthetic identity, catalog application/access level, business reason, and duration. Day-based durations mean temporary access. Submit calls `Workflow.submit`; the backend supplies the request reference and safe message. Status labels come from persisted requests/audit outcomes, including audit-only intake failures.
+- **Reviewer Inbox:** all pending approvals and exceptions are visible. Select any synthetic identity to demonstrate authorized, wrong-reviewer, inactive-reviewer, and self-approval attempts. Approve calls `Workflow.approve`; Deny calls `Workflow.reject`. After an action, the inbox refreshes and preserves that action's feedback snapshot.
+- **IT Operations:** read-only tables show requests, actual mock-directory grants, temporary lifecycle fields, failed/exception requests, audit-only intake failures, and the latest 100 audit events. Use Refresh persisted state after external workflow operations. Timestamps are UTC. The app does not run a scheduler or process expiration on reruns; use the existing expiration workflow example above with these database paths.
+
+Quick demo: Alice Engineer + GitHub Read auto-approves; Alice + GitHub Write waits for Mike Manager; Paul Product + GitHub Write enters exception review for Grace GitHubOwner. Use Ian FormerEmployee or an empty business reason for validation feedback. For temporary access choose 1 day, 7 days, or 30 days as permitted by policy. All choices remain subject to backend validation.
+
+### Preserved limitations and assumptions
+
+This UI assumes one local operator invoking workflows serially, synthetic identities without authentication, and shared persistent state across tabs/sessions. Connections open and close per Streamlit rerun rather than caching thread-bound SQLite connections. The UI database additions are read-only snapshot methods. The catalog fix below generalizes workflow routing using the existing policies; policy data, audit-writing guarantees, and provider behavior are unchanged.
+
+Material gaps against the broader planning documents remain explicit:
+
+- The GitHub-only phase gate has been removed. All five applications use their configured policies; missing or rejecting policies still grant nothing.
+- Normal manager requests can be approved, but the current backend rejects their Deny action. Only exception denial is implemented. Both buttons delegate to the backend; the UI does not implement a denial transition or bypass this restriction.
+- Duplicate submissions can create distinct request rows; existing provider idempotency prevents duplicate access. The UI adds no submission deduplication.
+- Approval-wait expiration, blocked-request recovery, and failure recovery remain existing backend limitations. Expiration processing and failure injection remain available through the service interfaces; no UI controls or scheduler are added for them.
+
+The older Blueprint describes a policy editor and broader catalog/admin workflows. This phase follows the locked Implementation Contract and the explicit Phase 7 request: no policy editor or new business rules.
+
+Run all tests with:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+`tests/test_app.py` uses Streamlit AppTest with temporary database directories to verify actual UI/service wiring, auto-approval, review authorization and denial behavior, validation/system feedback, persistence, duplicate access protection, and operational expiration/failure visibility. Existing GitHub control tests remain in place. The obsolete Notion rejection case now tests an unsupported Notion access level; Notion Standard success is covered by catalog and UI tests.
+
+
+## Five-application catalog correction
+
+The original `Workflow._validate` phase gate rejected non-GitHub requests after successful policy matching. It also assumed Read meant automatic approval and Write meant manager approval. `Workflow.process` used the access-level name to decide whether human approval evidence was required. These assumptions are now replaced by the matched policy's decision and approver type. Normal approvals resolve one manager, application owner, or IT/security reviewer from trusted configuration and revalidate that reviewer and approval evidence before provisioning. Existing GitHub exceptions retain their configured single reviewer.
+
+Mock Okta was already application-neutral and is unchanged: it records the authorized employee/application/access tuple under the same idempotent grant contract. No configuration rows, application names, policies, database schema, or provider rules changed. Application and role choices in Streamlit come from the loaded policy records. The fixed catalog validation in `config.py` continues to reject unsupported applications and access levels.
+
+### Manual Streamlit QA
+
+Use a nonempty business reason such as "Project documentation and collaboration" and choose **Permanent** for each scenario below. For human approval, select the generated request ID and the listed reviewer in Reviewer Inbox, then click Approve. Each completed request should show ACTIVE in IT Operations and its grant in Active access in mock Okta.
+
+| Employee | Application | Access level | Approval |
+| --- | --- | --- | --- |
+| Alice Engineer (`UDEMO001`) | GitHub | Read | Automatic |
+| Alice Engineer (`UDEMO001`) | Figma | View | Automatic |
+| Alice Engineer (`UDEMO001`) | Notion | Standard | Automatic |
+| Sarah Sales (`UDEMO003`) | Salesforce | Standard | Sam SalesManager (`UDEMO010`) |
+| Alice Engineer (`UDEMO001`) | Snowflake | Read | Mike Manager (`UDEMO005`) |
+
+Additional existing configured paths also work: Paul / Figma Editor (automatic), Alice / Snowflake Write / 1 day (Dana DataOwner approval), and Mike / GitHub Admin / 1 day (Ivan ITSecurity approval). GitHub Write still requires Mike for Alice and exception review by Grace for Paul or Sarah. GitHub Admin remains restricted to the configured Engineering Manager title, IT/security approval, and a maximum seven-day temporary duration.
+
+`tests/test_catalog_workflow.py` derives its cases from every enabled, non-reject policy in the actual CSV. It checks committed authorization before provider invocation, pending requests granting nothing, required approval evidence, durable ACTIVE state and directory grants, lifecycle timestamps, audit events, post-approval revalidation, and provider failures. AppTest verifies an end-to-end UI path and the IT Operations grant table for every configured application. Unsupported application/access, missing-policy, employee-validation, and all existing GitHub authorization, exception, duration, expiration, retry, idempotency, and failure coverage remain.
+
+Assumptions remain serial local execution, trusted synthetic CSV configuration, and mock identities/providers. Restart or refresh Streamlit to load the updated code. Existing pending requests can be reviewed normally; old audit-only rejected intake records remain history and require a new valid submission. Normal approval denial and broader recovery remain deferred as documented above.

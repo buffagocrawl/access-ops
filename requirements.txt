@@ -1,2 +1,3 @@
-# Scaffold test dependency. SQLite and CSV support are in Python's standard library.
+# Local demo and tests. SQLite and CSV use Python's standard library.
 pytest>=8,<9
+streamlit>=1.41,<2

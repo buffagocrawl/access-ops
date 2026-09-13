@@ -1,10 +1,10 @@
-"""UI-independent orchestration for GitHub access and single-reviewer exceptions."""
+"""UI-independent, policy-driven orchestration for the configured catalog."""
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from .audit import event_for
-from .approvals import manager_for, exception_reviewer_for
+from .approvals import reviewer_for, exception_reviewer_for
 from .config import APPLICATION_ACCESS, Configuration, ConfigurationError
 from .database import Database
 from .integrations.mock_okta import AccessProvider, GrantResult, TransientProviderError, operation_id
@@ -62,17 +62,11 @@ class Workflow:
             raise IntakeError("No enabled policy matches this request. Contact IT for review and configuration correction; no access was granted.")
         if policy.decision not in (Decision.AUTO_APPROVE, Decision.APPROVAL_REQUIRED, Decision.EXCEPTION_REVIEW):
             raise IntakeError("This request cannot use automatic provisioning. Contact IT; no access was granted.")
-        exception = policy.decision == Decision.EXCEPTION_REVIEW
-        # Phase gate only: eligibility and approval decisions still come from CSV.
-        if (application != "GitHub" or access_level not in ("Read", "Write")
-                or (not exception and employee.department != "Engineering")):
-            raise IntakeError("This phase supports Engineering GitHub Read/Write and configured GitHub Write "
-                              "exceptions. Contact IT for other access.")
-        if ((exception and (access_level != "Write" or policy.approver_type not in
-                            (ApproverType.APPLICATION_OWNER, ApproverType.IT_SECURITY)))
-                or (access_level == "Read" and policy.decision != Decision.AUTO_APPROVE)
-                or (access_level == "Write" and not exception and (policy.decision != Decision.APPROVAL_REQUIRED
-                    or policy.approver_type != ApproverType.MANAGER))):
+        if ((policy.decision == Decision.AUTO_APPROVE and policy.approver_type != ApproverType.NONE)
+                or (policy.decision == Decision.APPROVAL_REQUIRED and policy.approver_type not in
+                    (ApproverType.MANAGER, ApproverType.APPLICATION_OWNER, ApproverType.IT_SECURITY))
+                or (policy.decision == Decision.EXCEPTION_REVIEW and policy.approver_type not in
+                    (ApproverType.APPLICATION_OWNER, ApproverType.IT_SECURITY))):
             raise IntakeError("The configured approval path is unsupported. Contact IT; no access was granted.")
         if duration not in DURATION_DAYS:
             raise IntakeError("Unsupported duration. Choose 1 day, 7 days, 30 days, 90 days, or Permanent; no access was granted.")
@@ -87,12 +81,8 @@ class Workflow:
     def submit(self, employee_id, application, access_level, business_reason, duration):
         try:
             policy = self._validate(employee_id, application, access_level, business_reason, duration)
-            reviewer = None
-            if policy.decision == Decision.APPROVAL_REQUIRED:
-                reviewer = manager_for(self.configuration, employee_id, policy)
+            reviewer = reviewer_for(self.configuration, employee_id, policy)
             exception = policy.decision == Decision.EXCEPTION_REVIEW
-            if exception:
-                reviewer = exception_reviewer_for(self.configuration, employee_id, policy)
             now = self._now()
             request = AccessRequest(
                 request_id=f"REQ-{uuid4().hex}", requester_slack_id=employee_id,
@@ -109,7 +99,7 @@ class Workflow:
                 request, policy, "EXCEPTION_DETECTED" if exception else
                 "REQUEST_SUBMITTED" if policy.decision == Decision.APPROVAL_REQUIRED else "REQUEST_AUTO_APPROVED", None,
                 "Request is outside normal eligibility; exception review required." if exception else
-                "Request created pending manager approval." if policy.decision == Decision.APPROVAL_REQUIRED else "Request created and automatically approved."
+                "Request created pending configured reviewer approval." if policy.decision == Decision.APPROVAL_REQUIRED else "Request created and automatically approved."
             ))
             if exception:
                 request = self._record(
@@ -119,7 +109,7 @@ class Workflow:
                 )
             elif policy.decision == Decision.APPROVAL_REQUIRED and reviewer is None:
                 request = self._record(request, "APPROVAL_ROUTING_FAILED",
-                                       "Configured manager could not be resolved; review is blocked.")
+                                       "Configured reviewer could not be resolved; review is blocked.")
         except ConfigurationError:
             return self._intake_stopped("Policy configuration cannot safely resolve this request. Contact IT for configuration correction; no access was granted.", RequestStatus.REJECTED)
         except IntakeError as error:
@@ -128,7 +118,7 @@ class Workflow:
             return stopped("The request could not be recorded safely. Contact IT; no access was granted.")
         if exception:
             return exception_pending(request)
-        return pending(request) if policy.decision == Decision.APPROVAL_REQUIRED else self.process(request.request_id)
+        return pending(request, policy.approver_type) if policy.decision == Decision.APPROVAL_REQUIRED else self.process(request.request_id)
 
     def _intake_stopped(self, message, status):
         # Requests require a matched policy. Preserve pre-policy failures in the
@@ -198,7 +188,7 @@ class Workflow:
                                "No access was granted. Contact IT for further guidance.", request_id)
             self._record(request, "EXCEPTION_APPROVED" if exception else "REQUEST_APPROVED",
                          "Assigned reviewer approved the exception." if exception else
-                         "Assigned manager approved the request.",
+                         "Assigned reviewer approved the request.",
                          reviewer_id, RequestStatus.APPROVED)
         except Exception:
             return stopped("Approval stopped safely. Contact IT to check the request state.", request_id)
@@ -243,23 +233,24 @@ class Workflow:
             if request.status == RequestStatus.EXCEPTION_REVIEW:
                 return exception_pending(request)
             if request.status == RequestStatus.PENDING_APPROVAL:
-                return pending(request)
+                saved_id, _ = self.database.policy_reference(request_id)
+                policy = next((p for p in self.configuration.policies if p.policy_id == saved_id), None)
+                return pending(request, policy.approver_type if policy else None)
             if request.status != RequestStatus.APPROVED:
                 return stopped("Processing is stopped. Contact IT to check the access state.", request_id)
-            human = request.access_level == "Write"
             try:
                 policy = self._validate(
                     request.requester_slack_id, request.application, request.access_level,
                     request.business_reason, request.duration,
                 )
+                human = policy.decision in (Decision.APPROVAL_REQUIRED, Decision.EXCEPTION_REVIEW)
                 if request.temporary != (request.duration != "Permanent"):
                     raise IntakeError("Stored duration is inconsistent; no access was granted.")
                 if self.database.policy_reference(request_id) != (policy.policy_id, policy.policy_version):
                     raise IntakeError("Policy changed. Contact IT; no provisioning was attempted.")
                 if human:
                     exception = policy.decision == Decision.EXCEPTION_REVIEW
-                    resolver = exception_reviewer_for if exception else manager_for
-                    reviewer = resolver(self.configuration, request.requester_slack_id, policy)
+                    reviewer = reviewer_for(self.configuration, request.requester_slack_id, policy)
                     approval_event = "EXCEPTION_APPROVED" if exception else "REQUEST_APPROVED"
                     if (reviewer is None or reviewer != request.assigned_approver_id
                             or not any(e.event_type == approval_event and e.actor == reviewer
