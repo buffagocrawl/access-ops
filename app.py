@@ -123,6 +123,7 @@ def render(configuration, database, provider):
         audit = database.recent_audit_rows()
         table("Intake failures (within recent audit events)", [r for r in audit if r["event_type"] == "INTAKE_STOPPED"])
         table("Recent audit events (latest 100)", audit)
+        table("Mock IT Operations inbox", workflow.notifications.deliveries())
 
 
 def main():

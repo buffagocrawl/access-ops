@@ -9,7 +9,7 @@ from .config import APPLICATION_ACCESS, Configuration, ConfigurationError
 from .database import Database
 from .integrations.mock_okta import AccessProvider, GrantResult, TransientProviderError, operation_id
 from .models import AccessRequest, AuditEvent, ApproverType, Decision, EmployeeStatus, RequestStatus, RevocationStatus
-from .notifications import granted, pending, exception_pending, stopped
+from .notifications import granted, pending, exception_pending, stopped, manual_pending, MockNotifications
 from .policy_engine import match_policy
 
 
@@ -36,6 +36,7 @@ class Workflow:
         self.configuration = configuration
         self.database = database
         self.provider = provider
+        self.notifications = MockNotifications(database)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def _now(self):
@@ -57,9 +58,11 @@ class Workflow:
             raise IntakeError("The requested application is unsupported. Choose an application from the catalog or contact IT; no access was granted.")
         if access_level not in APPLICATION_ACCESS[application]:
             raise IntakeError(f"The requested access level is unsupported for {application}. Choose a listed access level or contact IT; no access was granted.")
+        if duration not in DURATION_DAYS:
+            raise IntakeError("Unsupported duration. Choose 1 day, 7 days, 30 days, 90 days, or Permanent; no access was granted.")
         policy = match_policy(self.configuration, employee_id, application, access_level)
         if policy is None:
-            raise IntakeError("No enabled policy matches this request. Contact IT for review and configuration correction; no access was granted.")
+            return None
         if policy.decision not in (Decision.AUTO_APPROVE, Decision.APPROVAL_REQUIRED, Decision.EXCEPTION_REVIEW):
             raise IntakeError("This request cannot use automatic provisioning. Contact IT; no access was granted.")
         if ((policy.decision == Decision.AUTO_APPROVE and policy.approver_type != ApproverType.NONE)
@@ -68,8 +71,6 @@ class Workflow:
                 or (policy.decision == Decision.EXCEPTION_REVIEW and policy.approver_type not in
                     (ApproverType.APPLICATION_OWNER, ApproverType.IT_SECURITY))):
             raise IntakeError("The configured approval path is unsupported. Contact IT; no access was granted.")
-        if duration not in DURATION_DAYS:
-            raise IntakeError("Unsupported duration. Choose 1 day, 7 days, 30 days, 90 days, or Permanent; no access was granted.")
         days = DURATION_DAYS[duration]
         if days is None:
             if not policy.permanent_allowed:
@@ -81,6 +82,8 @@ class Workflow:
     def submit(self, employee_id, application, access_level, business_reason, duration):
         try:
             policy = self._validate(employee_id, application, access_level, business_reason, duration)
+            if policy is None:
+                return self._manual_review(employee_id, application, access_level, business_reason, duration)
             reviewer = reviewer_for(self.configuration, employee_id, policy)
             exception = policy.decision == Decision.EXCEPTION_REVIEW
             now = self._now()
@@ -120,8 +123,31 @@ class Workflow:
             return exception_pending(request)
         return pending(request, policy.approver_type) if policy.decision == Decision.APPROVAL_REQUIRED else self.process(request.request_id)
 
+    def _manual_review(self, employee_id, application, access_level, business_reason, duration):
+        now = self._now()
+        request = AccessRequest(
+            request_id=f"REQ-{uuid4().hex}", requester_slack_id=employee_id,
+            application=application, access_level=access_level, business_reason=business_reason,
+            temporary=duration != "Permanent", duration=duration, expires_at=None,
+            created_at=now, updated_at=now, status=RequestStatus.MANUAL_REVIEW,
+        )
+        recipient = self.configuration.it_operations_recipient
+        # Empty policy reference/version zero explicitly means no matched policy.
+        self.database.create(request, None, AuditEvent(
+            request_id=request.request_id, event_type="MANUAL_REVIEW_ROUTED", actor="access_ops",
+            previous_status=None, new_status=request.status, timestamp=now, policy_version=None,
+            details=f"No enabled policy matches; manual review assigned to {recipient}. No access authorized.",
+        ))
+        self.notifications.send(recipient, stopped(
+            f"Manual review for <@{employee_id}>: {application} {access_level}; duration: {duration}; "
+            f"business reason: {business_reason}. No matching policy; verify eligibility and correct "
+            "configuration before requesting access again. This request cannot authorize provisioning.",
+            request.request_id,
+        ))
+        return manual_pending(request)
+
     def _intake_stopped(self, message, status):
-        # Requests require a matched policy. Preserve pre-policy failures in the
+        # Preserve invalid intake failures in the
         # existing audit store without inventing employee or policy records.
         request_id = f"REQ-{uuid4().hex}"
         try:
@@ -228,6 +254,8 @@ class Workflow:
             request = self.database.get(request_id)
             if request is None:
                 return stopped("Request not found. Check the request ID or contact IT.")
+            if request.status == RequestStatus.MANUAL_REVIEW:
+                return manual_pending(request)
             if request.status == RequestStatus.ACTIVE:
                 return granted(request)
             if request.status == RequestStatus.EXCEPTION_REVIEW:
@@ -324,8 +352,14 @@ class Workflow:
                 removed, attempt = self._provider_operation(request, "revoke", now=now)
                 outcome = f" Operation {operation_id(request, 'revoke')}; revoke attempt {attempt}."
                 if removed is not True:
-                    self._record(request, "REVOCATION_FAILED", "Provider did not confirm removal of the stored grant." + outcome,
+                    failed = self._record(request, "REVOCATION_FAILED", "Provider did not confirm removal of the stored grant." + outcome,
                                  status=RequestStatus.REVOCATION_FAILED, now=now)
+                    self.notifications.send(self.configuration.it_operations_recipient, stopped(
+                        f"Revocation failed for <@{failed.requester_slack_id}>: {failed.application} "
+                        f"{failed.access_level}. Operation {operation_id(failed, 'revoke')}. "
+                        "Removal was not confirmed; access may remain. Verify and remove the stored grant; "
+                        "no automatic retry will occur.", failed.request_id,
+                    ))
                     responses.append(stopped("Temporary access expired, but removal was not confirmed. "
                                              "Access may remain. Contact IT with this request ID to verify and "
                                              "remove the stored grant; no automatic retry will occur.", request.request_id))
