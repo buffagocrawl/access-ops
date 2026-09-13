@@ -1,6 +1,6 @@
 \# Customer.io Access Ops - Implementation Contract
 
-## Human-authorized Day 4 extension — September 13, 2026
+## Human-authorized Day 4 extension: September 13, 2026
 
 This amendment supersedes earlier exclusions of local policy administration and access removal unrelated to expiration. Branden explicitly authorized these focused ownership features; the five-application catalog, deterministic workflow, single-reviewer constraint, and mock integration boundaries remain.
 
@@ -130,7 +130,7 @@ A production implementation could require additional approval stages, but they w
 
 
 
-\## Nice to Have — Only After Core Workflow Passes
+\## Nice to Have: Only After Core Workflow Passes
 
 
 
@@ -397,6 +397,6 @@ Prefer a small implementation that satisfies these behaviors over additional fea
 
 
 
-## Human-authorized application lifecycle refinement � September 13, 2026
+## Human-authorized application lifecycle refinement: September 13, 2026
 
 Branden authorized non-technical application onboarding and application soft disable/re-enable in IT Operations. Applications are retained in a validated `applications.csv` catalog with an enabled flag; policies remain separate configuration rows. Hard deletion is excluded: history, audit references and active grants remain readable. Disabling stops new requests only and never revokes existing access. Creation, disable and re-enable use deterministic validation, mocked owner authorization, review/save confirmation and the existing configuration audit history. Production would add authenticated RBAC and stronger change approval.

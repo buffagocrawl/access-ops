@@ -3,7 +3,7 @@
 **Day 4 human refinement:** Branden authorized reasoned normal/exception rejection, explicit reasoned manual access removal, and structured editing of existing policy rows. The current implementation boundaries are specified in the Day 4 amendment to `Implementation_Contract.md` and `Technical_Design.md`. Process-step explanations remain in documentation and are removed from application pages; the UI focuses on actions, results and ownership. This does not introduce runtime AI, production authentication or real Slack/Okta integrations.
 
 **Owner:** Branden Lemire  
-**Status:** Architecture approved; implementation pending  
+**Status:** Implemented local prototype; architecture remains the reference design
 **Selected category:** Software access requests  
 **Implementation choice:** Deterministic automation  
 
@@ -87,7 +87,7 @@ Before a production build, ask:
 - AI independently authorizing, approving, provisioning, or retrying access changes
 - A general-purpose workflow builder
 
-## 5. Traditional Architecture — Implemented Design
+## 5. Traditional Architecture: Implemented Design
 
 ```mermaid
 flowchart TD
@@ -98,6 +98,7 @@ flowchart TD
     E -->|Auto-approved| F[Mock Okta provisioning]
     E -->|Approval required| G[Reviewer approval]
     E -->|Out of policy| H[Exception review]
+    E -->|No matching policy| L[Persist MANUAL_REVIEW and notify mock IT]
     E -->|Prohibited| I[Reject or escalate]
     G -->|Approved| F
     H -->|Approved| F
@@ -115,9 +116,9 @@ flowchart TD
 6. **Configuration interface:** Allows an authorized nontechnical owner to maintain policies.
 7. **Operations dashboard:** Surfaces status, performance, expirations, and failures.
 
-The policy engine—not AI—decides whether access is permitted and which approval is required.
+The policy engine, not AI, decides whether access is permitted and which approval is required.
 
-## 6. Agentic Architecture — Documented Alternative
+## 6. Agentic Architecture: Documented Alternative
 
 ```mermaid
 flowchart TD
@@ -337,7 +338,8 @@ The prototype simulates roles and identity. Production would use company SSO and
 | Missing required field | Set `Needs Information` and ask for the specific value |
 | Unknown application/access | Route to IT review |
 | Directory unavailable | Pause evaluation; do not authorize |
-| No approver configured | Set `Configuration Error` and alert IT |
+| No matching policy | Persist `MANUAL_REVIEW`, notify mock IT for investigation, and authorize nothing |
+| No approver configured | Stop safely, retain the request, and route the issue to IT; no access is authorized |
 | Approval notification fails | Keep `Pending Approval`; retain the request |
 | Unauthorized approval attempt | Reject and audit the action |
 | Duplicate approval click | Return the previously recorded result |
@@ -346,7 +348,7 @@ The prototype simulates roles and identity. Production would use company SSO and
 | Revocation failure | Set `Revocation Failed` and alert IT immediately |
 | Database write failure | Stop; do not approve or provision without an audit record |
 
-Automatic retries use a maximum of three attempts, increasing delay, and a stable idempotency key such as `REQ-1042:grant` or `REQ-1042:revoke`. Repeated calls return the existing result instead of duplicating access.
+Only transient provider failures receive bounded immediate retries: at most three provider attempts total, with no sleep, delay, backoff, or scheduled retry. Stable request-specific operation keys such as `REQ-1042:grant` and `REQ-1042:revoke` prevent duplicate provider operations. Separate submissions may create separate request records, but the provider prevents duplicate access grants.
 
 The demo will provide explicit failure controls so failure behavior can be shown reliably rather than depending on random breakage.
 
@@ -433,7 +435,7 @@ They should not need to edit Python code for routine policy changes. Structural 
 
 The initial AI-designed policy treated employees outside eligible departments/titles too rigidly. After Branden challenged it with a realistic Product Manager who needs GitHub write access, the proposed exception path then required both manager and application-owner/IT approval. Branden overruled that added complexity for the take-home: the exception now routes directly to one configured GitHub application owner or IT reviewer. This preserves human review for out-of-policy access while honoring the prototype rule that each request has at most one approver and avoiding a sequential workflow that is unnecessary for the narrow demonstration.
 
-## 20. Tomorrow's Implementation Contract
+## 20. Implementation sequence used
 
 The smallest working vertical slice is:
 
@@ -460,4 +462,4 @@ Then add, in order:
 - Success metrics and monitoring are defined.
 - A nontechnical maintenance approach is documented.
 - AI usage and Branden's genuine override are recorded.
-- Tomorrow's first vertical slice can be built without making foundational policy decisions.
+- The completed vertical slice remains explainable without making additional foundational policy decisions.

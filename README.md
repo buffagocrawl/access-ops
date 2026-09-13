@@ -20,6 +20,8 @@ SQLite stores requests and append-style audit history in the workflow database; 
 
 See [Access Ops Architecture and Approach Comparison](Planning/Access-Ops_Architecture.md) for the detailed design and agentic alternative. The [Implementation Contract](Planning/Implementation_Contract.md), including Branden's Day 4 ownership amendment, governs build scope. Real authenticated identities, scheduling and delayed retries remain future-state. Local policy editing, reasoned reviewer rejection and manual access removal are implemented.
 
+The handoff set includes the [non-technical maintenance guide](Planning/Maintenance_Guide.md), [project timeline](Planning/Project_Timeline.md), [AI Usage Log](Planning/AI_Usage_Log.md), and [13-area written-submission coverage](Planning/Written_Submission.md). The two architecture diagrams are in [Access Ops Architecture](Planning/Access-Ops_Architecture.md): the selected deterministic component architecture and the documented agentic alternative.
+
 ## Implemented vs mocked vs future-state
 
 ### Implemented behavior
@@ -398,9 +400,9 @@ From the repository root:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-`pytest.ini` adds `src/` to the test import path and collects `tests/`. The full suite verified on September 12, 2026 with Python 3.12.10 passed: **334 passed, 0 failed** in 45.17 seconds.
+`pytest.ini` adds `src/` to the test import path and collects `tests/`. Final documentation QA on September 13, 2026 passed: **403 passed, 0 failed** in 60.42 seconds.
 
-[Phase 8 acceptance testing](Planning/Phase_8_Acceptance_Audit.md) passed all **15/15 criteria**, with a recorded 334-test full-suite pass. Those criteria evaluate the implemented prototype and mocked boundaries, not production integrations or every broader planning proposal.
+[Phase 8 acceptance testing](Planning/Phase_8_Acceptance_Audit.md) passed all **15/15 criteria** in its recorded run. The final documentation-QA suite passed 403 tests. Those criteria evaluate the implemented prototype and mocked boundaries, not production integrations or every broader planning proposal.
 
 Coverage includes normal automatic and human approval, reasoned normal/exception rejection, invalid and policy-less intake, unauthorized/self-review, duplicate access and approval replay, provisioning failure, expiration, revocation failure, committed audit ordering, bounded retries, and persistence across database reopening. `test_administration.py` adds owner authorization, exact grant ownership, reasoned manual removal, configuration validation/versioning/audit, and unchanged historical-request checks. `test_app.py` verifies UI/service wiring, prefills and owner workflows.
 

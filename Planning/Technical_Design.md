@@ -134,10 +134,10 @@ The exact application/access combinations and policy rows remain in editable syn
 
 The demo reviewer records are:
 
-- **Mike Manager** — manager approval
-- **Grace GitHubOwner** — application-owner approval
-- **Ivan ITSecurity** — security and exception review
-- **Dana DataOwner** — sensitive-data application approval
+- **Mike Manager**: manager approval
+- **Grace GitHubOwner**: application-owner approval
+- **Ivan ITSecurity**: security and exception review
+- **Dana DataOwner**: sensitive-data application approval
 
 These are synthetic demo records, not representations of Customer.io employees. Reviewer identity and authority are looked up from trusted demo configuration; they are not supplied by the requester or selected by the UI.
 
@@ -161,7 +161,7 @@ The workflow must enforce these boundaries:
 
 `config/employees.csv` is the synthetic trusted directory. It should contain the Slack identity, name, email, department, title, manager, and active/inactive status needed by the workflow and audit context.
 
-`config/access_policies.csv` is the editable policy catalog. It should represent the five supported applications—GitHub, Figma, Notion, Salesforce, and Snowflake—along with access level, eligibility, decision type, approver role, temporary-access rules, maximum duration, enabled status, and policy version as required by the existing contract.
+`config/access_policies.csv` is the editable policy catalog. It should represent the five supported applications: GitHub, Figma, Notion, Salesforce, and Snowflake, along with access level, eligibility, decision type, approver role, temporary-access rules, maximum duration, enabled status, and policy version as required by the existing contract.
 
 SQLite stores the current request/access state and append-style audit events. The current record answers where a request is now; audit history records how it reached that state. Configuration loading must validate required columns, recognized values, enabled policies, approver availability, and policy consistency before processing requests.
 

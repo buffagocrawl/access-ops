@@ -114,6 +114,7 @@ flowchart TD
     E -->|"Auto-approve"| H["Revalidate employee and policy"]
     E -->|"Approval required"| F["Send private reviewer message"]
     E -->|"Plausible exception"| G["Route to one configured exception reviewer"]
+    E -->|"No matching policy"| N["Persist MANUAL_REVIEW and notify mock IT Operations inbox"]
     E -->|"Prohibited or unsafe"| C
     F -->|"Approve"| H
     F -->|"Deny"| I["Record denial and notify employee"]
@@ -162,6 +163,7 @@ stateDiagram-v2
     Evaluating --> PendingApproval: Human decision required
     Evaluating --> Approved: Auto-approved
     Evaluating --> ExceptionReview: Outside normal eligibility
+    Evaluating --> ManualReview: No matching enabled policy
     Evaluating --> Rejected: Prohibited
     PendingApproval --> Approved: Assigned reviewer approves
     PendingApproval --> Rejected: Reviewer denies
@@ -383,10 +385,12 @@ Recommended architecture by request category:
 | Missing required field | Set `Needs Information` and identify the specific missing value |
 | Unknown application or access level | Do not guess; route to IT review |
 | Directory unavailable | Pause evaluation and authorize nothing |
-| No matching policy or approver | Set configuration error and alert IT |
+| No matching policy | Persist `MANUAL_REVIEW`, notify the mock IT Operations inbox for investigation, and authorize nothing |
+| No approver configured | Stop safely and route the issue to IT; this is separate from the no-policy path |
 | Unauthorized or self-approval attempt | Reject the action and audit it |
-| Duplicate submission or approval | Return the existing result without duplicating access |
-| Provider timeout | Retry up to three times with increasing delay and a stable idempotency key |
+| Duplicate submission | A separate request record may be created; duplicate provider grants are prevented |
+| Duplicate approval | Reject and audit the replay without provisioning again |
+| Transient provider failure | Retry immediately, up to three provider attempts total, using the stable operation key; no delay, backoff, or scheduled retry is implemented |
 | Authentication failure | Stop and alert IT; do not retry blindly |
 | Provisioning failure | Preserve valid approval, mark provisioning failed, and allow controlled retry |
 | Confirmation failure | Preserve successful access state and retry only the notification |
