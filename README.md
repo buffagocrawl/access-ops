@@ -179,7 +179,7 @@ print(workflow.approve(response.request_id, reviewer_id="UDEMO005").message)
 
 Configuration remains an immutable in-memory snapshot: trusted calling code must explicitly assign `workflow.configuration = load_configuration("config")` to adopt CSV changes before approval. CSV files are not watched automatically. Reviewer identity is mocked, not authenticated by this service. Processing remains sequential. Existing SQLite databases gain one nullable `assigned_approver_id` column on opening; existing requests are preserved.
 
-Tests cover pending persistence, no provisioning while pending, wrong/self reviewers, correct manager approval, approval audit ordering, revalidation both while pending and after approval, inactive/missing/ineligible requesters, changed policy/manager, unresolved reviewers, and audit failures. Step 12 adds normal permanent Engineering GitHub Write approval. Step 13 extends this machinery for exception review as described next. Step 15 adds temporary access/expiration/revocation below. Failure injection, retries, and generalized idempotency remain later work.
+Tests cover pending persistence, no provisioning while pending, wrong/self reviewers, correct manager approval, approval audit ordering, revalidation both while pending and after approval, inactive/missing/ineligible requesters, changed policy/manager, unresolved reviewers, and audit failures. Step 12 adds normal permanent Engineering GitHub Write approval. Step 13 extends this machinery for exception review as described next. Step 15 adds temporary access/expiration/revocation below. Steps 16 and 17 below add failure injection, bounded retries, and provider-operation idempotency.
 
 ### Exception review (Phase 6, Step 13)
 
@@ -227,7 +227,7 @@ Missing managers now preserve `PENDING_APPROVAL` with no assigned reviewer and `
 
 Revalidation failures now record `REVALIDATION_FAILED` and `REJECTED` for automatic as well as human-approved requests. Existing approval history is retained. Tests cover each invalid outcome, audit persistence and deterministic states, exact matching, blocked managers and exception reviewers, no provider calls, and safe messages on internal errors.
 
-The existing GitHub Read/Write phase limits remain. Step 15 adds temporary access and expiration/revocation below. Failure-injection controls, retries, generalized idempotency, and blocked-request recovery remain deferred. Planning documents and configuration are unchanged.
+The existing GitHub Read/Write phase limits remain. Step 15 adds temporary access and expiration/revocation below. Steps 16 and 17 below add failure injection, bounded retries, and provider-operation idempotency. Blocked-request recovery remains deferred. Planning documents and configuration are unchanged.
 
 
 ### Phase 6, Step 15: temporary access
@@ -258,7 +258,7 @@ print(database.events(request.request_id))
 
 Assumptions: invoke this local workflow serially. A temporary request receiving `ALREADY_EXISTS` fails closed without a start or expiration, because it did not create its own expiring grant. Expiration uses the stored grant rather than current eligibility policy, so later employee/configuration changes do not prevent removing the original access. An unconfirmed removal now persists REVOCATION_FAILED with revocation_status PENDING for inspection and is not automatically retried (Step 16 below). Crash recovery across provider and workflow databases is not implemented.
 
-Tests cover all five durations, disallowed/unsupported durations, pending approvals and exceptions, execution-time revalidation, expiration boundaries, durable lifecycle/audit records, exact grant targeting, pre-action audit failure, and repeated processing. Step 16 adds explicit failure injection and revocation-failure handling below; Step 17 retains provider retries and broader idempotency. No scheduler infrastructure is added.
+Tests cover all five durations, disallowed/unsupported durations, pending approvals and exceptions, execution-time revalidation, expiration boundaries, durable lifecycle/audit records, exact grant targeting, pre-action audit failure, and repeated processing. Step 16 adds explicit failure injection and revocation-failure handling below; Step 17 adds bounded provider retries and operation idempotency below. No scheduler infrastructure is added.
 
 
 ### Phase 6, Step 16: deterministic failure injection
@@ -269,4 +269,29 @@ Grant failure follows the usual validation, policy, approval, revalidation, and 
 
 For a removal-failure demo, construct the provider with only `fail_revoke=True`, obtain temporary access normally, then call `workflow.process_expired_access(now=request.expires_at)`. `ACCESS_EXPIRED` and `REVOCATION_STARTED` commit before removal is attempted. A false/unconfirmed result or provider exception persists request status `REVOCATION_FAILED` and the matching audit event. The injected failure leaves the grant present. `revocation_status` remains `PENDING`, meaning removal is unconfirmed; the request status explicitly records failure. Start/expiration timestamps and all earlier approval/provisioning events remain intact. Feedback directs IT to verify and remove the grant and states that no automatic retry will occur.
 
-Later expiration calls skip failed requests and return no result for them; they do not retry, change failure state, or claim removal. Permanent access is unaffected. This step assumes the existing serial local invocation model and uses returned Slack-style feedback for employee/admin follow-up. Retries, counters, backoff, error classification, provider idempotency changes, and automatic recovery remain deferred to Step 17.
+Later expiration calls skip failed requests and return no result for them; they do not retry, change failure state, or claim removal. Permanent access is unaffected. This step assumes the existing serial local invocation model and uses returned Slack-style feedback for employee/admin follow-up. Step 17 below adds bounded transient retries and provider-operation idempotency. Backoff infrastructure and automatic recovery remain deferred.
+
+
+### Phase 6, Step 17: retry and provider-operation idempotency
+
+Only `TransientProviderError` raised by a provider call is retryable. It explicitly represents a timeout or temporary provider unavailability. `GrantResult.FAILED`, unconfirmed revoke results, malformed results, and all other exceptions are non-retryable, including authentication, authorization, invalid input, and configuration errors. Grant success remains `GRANTED` or `ALREADY_EXISTS`; revoke `True` confirms either removal now or a previously completed removal. An absent grant without a recorded successful revoke is still unconfirmed (`False`).
+
+The workflow makes at most **three provider attempts total**, with no sleeps or delays. Validation, approval, revalidation, and expiration checks happen before this loop. Initial `PROVISIONING_STARTED` / `REVOCATION_STARTED` events commit before attempt 1. Each failure records `PROVIDER_ATTEMPT_FAILED` with operation ID, verb, attempt number, and transient/non-retryable classification. `PROVIDER_RETRYING` commits before each additional attempt. Any audit persistence failure stops processing without another provider call. The final lifecycle event includes the operation ID and final attempt number. Approval and earlier provisioning history remain intact; success is persisted once, only after confirmation.
+
+The existing request-based adapter interface derives stable IDs with `operation_id(request, "grant")` or `operation_id(request, "revoke")`: for example `REQ-1042:grant` and `REQ-1042:revoke`. Every attempt uses the same persisted request ID; IDs do not authorize access. Mock Okta stores completed operation IDs and the employee/application/access tuple in `mock_operations`, in the same SQLite transaction as the directory change. This additive table preserves existing directory data. Replaying a completed grant returns `ALREADY_EXISTS` while access exists, and never recreates revoked access (returns `FAILED` if absent). Replaying a completed revoke returns `True` without deleting anything, including a newer replacement grant. Reusing a completed key with different access is rejected. Revoke still targets only the original `:grant` key.
+
+Deterministic demo construction:
+
+```python
+# Fail the first two attempts of each operation, then succeed on attempt three.
+provider = MockOkta("provider.db", transient_grant_failures=2,
+                    transient_revoke_failures=2)
+# Exhaust the three-attempt workflow limit for grants.
+provider = MockOkta("provider.db", transient_grant_failures=3)
+# Non-retryable failure: one call only (existing Step 16 flags).
+provider = MockOkta("provider.db", fail_grant=True, fail_revoke=True)
+```
+
+Counts default to zero and must be nonnegative integers. They apply independently per operation ID within a mock instance; reopening resets simulated attempt counts but preserves completed operations. Completed-operation checks precede failure injection; permanent failure flags take precedence over transient injection for new operations. A count of three or more exhausts the workflow limit. After terminal `PROVISIONING_FAILED` or `REVOCATION_FAILED`, subsequent workflow processing does not start another attempt budget. Revocation failure retains `PENDING` removal status and safe IT guidance. No failure classification or raw exception text is exposed to employees.
+
+Assumptions remain serial local execution and mocked identity/provider calls. Production concerns left out include concurrent/distributed coordination, crash reconciliation between workflow and provider databases, durable scheduling/backoff, real provider error mapping, and operational alert delivery. Existing temporary `ALREADY_EXISTS` handling remains conservative: it does not infer a new start time or expiration. This step does not add broad duplicate-submission detection or recovery for blocked approvals.
