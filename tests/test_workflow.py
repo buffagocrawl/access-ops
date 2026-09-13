@@ -1,13 +1,14 @@
 """Focused end-to-end checks for the first Access Ops vertical slice."""
 from dataclasses import replace
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from access_ops.config import load_configuration
 from access_ops.database import Database
 from access_ops.integrations.mock_okta import GrantResult, MockOkta
-from access_ops.models import Decision, EmployeeStatus, RequestStatus
+from access_ops.models import Decision, EmployeeStatus, RequestStatus, RevocationStatus
 from access_ops.workflow import Workflow
 
 
@@ -91,6 +92,8 @@ def test_existing_access_is_confirmed_without_second_grant(system):
     assert first.request_id != second.request_id  # Submission deduplication is deferred.
     assert database.get(second.request_id).status == RequestStatus.ACTIVE
     assert database.get(second.request_id).provisioning_result == GrantResult.ALREADY_EXISTS
+    assert database.get(second.request_id).starts_at is None
+    assert database.get(second.request_id).expires_at is None
     assert len(provider.access_list()) == 1
 
 
@@ -100,7 +103,7 @@ def test_existing_access_is_confirmed_without_second_grant(system):
     {"employee_id": "UDEMO011", "access_level": "Write"},
     {"application": "Notion", "access_level": "Standard"},
     {"application": "Unknown"}, {"access_level": "Owner"},
-    {"duration": "7 days"}, {"duration": ""}, {"business_reason": "  "},
+    {"duration": "2 days"}, {"duration": ""}, {"business_reason": "  "},
     {"application": ""}, {"access_level": None}, {"business_reason": None},
 ])
 def test_invalid_or_out_of_slice_intake_never_calls_provider(system, monkeypatch, overrides):
@@ -673,3 +676,211 @@ def test_intake_internal_errors_return_fixed_safe_feedback(system, monkeypatch, 
     assert all(value not in response.message for value in ("Traceback", "sqlite", "private-token", "/private", "RuntimeError"))
     assert provider.access_list() == []
     assert database.connection.execute("SELECT count(*) FROM requests").fetchone()[0] == 0
+
+
+# Phase 6, Step 15: temporary access on the existing workflow paths.
+
+
+@pytest.mark.parametrize("duration,days", [("1 day", 1), ("7 days", 7), ("30 days", 30), ("90 days", 90), ("Permanent", None)])
+def test_duration_lifecycle_round_trip(system, tmp_path, duration, days):
+    workflow, database, provider = system
+    now = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
+    workflow.clock = lambda: now
+    if days == 90:
+        workflow.configuration = replace(workflow.configuration, policies=tuple(
+            replace(p, max_duration_days=90) if p.policy_id == "GH-READ-ENG" else p
+            for p in workflow.configuration.policies))
+    response = submit(workflow, duration=duration)
+    reopened = Database(tmp_path / "workflow.db")
+    try:
+        request = reopened.get(response.request_id)
+        assert request.status == RequestStatus.ACTIVE
+        assert request.duration == duration
+        assert request.starts_at == now
+        assert request.expires_at == (now + timedelta(days=days) if days else None)
+        assert request.temporary == (days is not None)
+        assert request.revocation_status == (RevocationStatus.PENDING if days else RevocationStatus.NOT_APPLICABLE)
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("duration,changes", [
+    ("2 days", {}), ("7", {}), ("permanent", {}), (" 7 days", {}),
+    ("90 days", {}), ("30 days", {"max_duration_days": 7}),
+    ("Permanent", {"permanent_allowed": False}), ("1 day", {"temporary_allowed": False}),
+])
+def test_duration_rejected_without_substitution(system, monkeypatch, duration, changes):
+    workflow, database, provider = system
+    workflow.configuration = replace(workflow.configuration, policies=tuple(
+        replace(p, **changes) if p.policy_id == "GH-READ-ENG" else p for p in workflow.configuration.policies))
+    calls = []
+    monkeypatch.setattr(provider, "grant", lambda request: calls.append(request))
+    response = submit(workflow, duration=duration)
+    assert database.get(response.request_id) is None
+    assert database.events(response.request_id)[0].new_status == RequestStatus.REJECTED
+    assert calls == [] and provider.access_list() == []
+
+
+@pytest.mark.parametrize("employee,reviewer,status", [
+    ("UDEMO001", "UDEMO005", RequestStatus.PENDING_APPROVAL),
+    ("UDEMO002", "UDEMO006", RequestStatus.EXCEPTION_REVIEW),
+])
+def test_pending_duration_starts_only_after_approval(system, tmp_path, employee, reviewer, status):
+    from access_ops.notifications import exception_review
+    workflow, database, provider = system
+    now = datetime(2026, 9, 12, tzinfo=timezone.utc)
+    workflow.clock = lambda: now
+    response = submit(workflow, employee_id=employee, access_level="Write", duration="7 days")
+    reopened = Database(tmp_path / "workflow.db")
+    try:
+        request = reopened.get(response.request_id)
+        assert request.status == status and request.duration == "7 days"
+        assert request.starts_at is None and request.expires_at is None
+        assert request.revocation_status == RevocationStatus.PENDING
+        assert "7 days" in exception_review(request).message
+    finally:
+        reopened.close()
+    now += timedelta(days=10)
+    workflow.approve(response.request_id, reviewer)
+    request = database.get(response.request_id)
+    assert request.starts_at == now and request.expires_at == now + timedelta(days=7)
+
+
+@pytest.mark.parametrize("employee,reviewer", [("UDEMO001", "UDEMO005"), ("UDEMO002", "UDEMO006")])
+@pytest.mark.parametrize("changes", [{"temporary_allowed": False}, {"max_duration_days": 1}])
+def test_temporary_duration_revalidated_after_approval(system, monkeypatch, employee, reviewer, changes):
+    workflow, database, provider = system
+    response = submit(workflow, employee_id=employee, access_level="Write", duration="7 days")
+    original = database.transition
+    def change_after_approval(request, event):
+        original(request, event)
+        if event.event_type in ("REQUEST_APPROVED", "EXCEPTION_APPROVED"):
+            workflow.configuration = replace(workflow.configuration, policies=tuple(
+                replace(p, **changes) for p in workflow.configuration.policies))
+    monkeypatch.setattr(database, "transition", change_after_approval)
+    workflow.approve(response.request_id, reviewer)
+    assert database.get(response.request_id).status == RequestStatus.REJECTED
+    assert database.get(response.request_id).duration == "7 days"
+    assert database.events(response.request_id)[-1].event_type == "REVALIDATION_FAILED"
+    assert provider.access_list() == []
+
+
+def test_expiration_audit_removal_and_repeat_survive_reopen(system, tmp_path, monkeypatch):
+    workflow, database, provider = system
+    response = submit(workflow, duration="1 day")
+    request = database.get(response.request_id)
+    history = database.events(request.request_id)
+    calls = []
+    original = provider.revoke
+    def observe(request):
+        reader = Database(tmp_path / "workflow.db")
+        try:
+            assert reader.get(request.request_id).status == RequestStatus.EXPIRED
+            assert [e.event_type for e in reader.events(request.request_id)][-2:] == ["ACCESS_EXPIRED", "REVOCATION_STARTED"]
+        finally:
+            reader.close()
+        calls.append(request.request_id)
+        return original(request)
+    monkeypatch.setattr(provider, "revoke", observe)
+    assert workflow.process_expired_access(request.expires_at - timedelta(microseconds=1)) == []
+    assert provider.access_list() and database.events(request.request_id) == history
+    assert "was removed" in workflow.process_expired_access(request.expires_at)[0].message
+    reopened = Database(tmp_path / "workflow.db")
+    try:
+        saved = reopened.get(request.request_id)
+        assert saved.status == RequestStatus.REVOKED and saved.revocation_status == RevocationStatus.REVOKED
+        assert saved.starts_at == request.starts_at and saved.expires_at == request.expires_at
+        events = reopened.events(request.request_id)
+        assert events[:len(history)] == history
+        assert [e.event_type for e in events[len(history):]] == ["ACCESS_EXPIRED", "REVOCATION_STARTED", "REVOCATION_SUCCEEDED"]
+        assert all(e.timestamp == request.expires_at for e in events[len(history):])
+        assert Workflow(workflow.configuration, reopened, provider).process_expired_access(request.expires_at + timedelta(days=1)) == []
+    finally:
+        reopened.close()
+    assert calls == [request.request_id] and provider.access_list() == []
+
+
+def test_permanent_never_expires(system, monkeypatch):
+    workflow, database, provider = system
+    response = submit(workflow)
+    history = database.events(response.request_id)
+    monkeypatch.setattr(provider, "revoke", lambda request: pytest.fail("Permanent access cannot be revoked"))
+    assert workflow.process_expired_access(datetime(2100, 1, 1, tzinfo=timezone.utc)) == []
+    assert database.events(response.request_id) == history and provider.access_list()
+
+
+@pytest.mark.parametrize("event_type", ["ACCESS_EXPIRED", "REVOCATION_STARTED"])
+def test_expiration_audit_failure_blocks_revoke(system, monkeypatch, event_type):
+    workflow, database, provider = system
+    response = submit(workflow, duration="1 day")
+    request = database.get(response.request_id)
+    original = database.append_event
+    def fail(event):
+        if event.event_type == event_type:
+            raise RuntimeError("private database error")
+        original(event)
+    monkeypatch.setattr(database, "append_event", fail)
+    monkeypatch.setattr(provider, "revoke", lambda request: pytest.fail("Audit must commit first"))
+    assert "private" not in workflow.process_expired_access(request.expires_at)[0].message
+    assert provider.access_list()
+
+
+def test_expiration_cannot_remove_another_stored_grant(system):
+    workflow, database, provider = system
+    response = submit(workflow, duration="1 day")
+    request = database.get(response.request_id)
+    with provider.connection:
+        provider.connection.execute("UPDATE mock_access SET grant_key = ?", ("another-request:grant",))
+    workflow.process_expired_access(request.expires_at)
+    assert provider.access_list()
+    assert database.get(request.request_id).revocation_status == RevocationStatus.PENDING
+    assert database.events(request.request_id)[-1].event_type == "REVOCATION_STARTED"
+
+
+def test_existing_access_cannot_be_assigned_a_new_expiration(system):
+    workflow, database, provider = system
+    submit(workflow)
+    response = submit(workflow, duration="1 day")
+    request = database.get(response.request_id)
+    assert request.status == RequestStatus.PROVISIONING_FAILED
+    assert request.starts_at is None and request.expires_at is None
+    assert workflow.process_expired_access(datetime(2100, 1, 1, tzinfo=timezone.utc)) == []
+    assert provider.access_list()
+
+
+def test_expiration_rejects_naive_time(system):
+    workflow, _, _ = system
+    with pytest.raises(ValueError, match="timezone-aware"):
+        workflow.process_expired_access(datetime(2026, 9, 12))
+
+
+@pytest.mark.parametrize("column,value", [("duration", "Permanent"), ("provisioning_result", "ALREADY_EXISTS"), ("starts_at", None)])
+def test_inconsistent_expiration_state_blocks_provider(system, monkeypatch, column, value):
+    workflow, database, provider = system
+    response = submit(workflow, duration="1 day")
+    request = database.get(response.request_id)
+    with database.connection:
+        database.connection.execute(f"UPDATE requests SET {column} = ? WHERE request_id = ?", (value, request.request_id))
+    monkeypatch.setattr(provider, "revoke", lambda request: pytest.fail("Inconsistent lifecycle cannot revoke"))
+    workflow.process_expired_access(request.expires_at)
+    assert database.events(request.request_id)[-1].event_type == "REVOCATION_BLOCKED"
+    assert provider.access_list()
+
+
+def test_legacy_database_migration_preserves_permanent_history(system, tmp_path):
+    workflow, database, _ = system
+    response = submit(workflow)
+    history = database.events(response.request_id)
+    # Reproduce the preceding slice's schema, then reopen through the migration.
+    with database.connection:
+        for column in ("duration", "temporary", "starts_at", "expires_at", "revocation_status"):
+            database.connection.execute(f"ALTER TABLE requests DROP COLUMN {column}")
+    reopened = Database(tmp_path / "workflow.db")
+    try:
+        request = reopened.get(response.request_id)
+        assert request.duration == "Permanent" and not request.temporary
+        assert request.starts_at is None and request.expires_at is None
+        assert request.revocation_status == RevocationStatus.NOT_APPLICABLE
+        assert reopened.events(response.request_id) == history
+    finally:
+        reopened.close()

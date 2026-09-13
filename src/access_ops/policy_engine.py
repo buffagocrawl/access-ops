@@ -8,7 +8,7 @@ def match_policy(
 ) -> AccessPolicy | None:
     """Return one rule or None (manual review); never infer permission.
 
-    Duration and reviewer authorization belong to the future workflow.
+    Duration and reviewer authorization belong to the workflow.
     """
     employee = configuration.employee(requester_slack_id)
     if employee is None or employee.status != EmployeeStatus.ACTIVE:

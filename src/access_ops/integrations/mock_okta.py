@@ -13,6 +13,10 @@ class GrantResult(StrEnum):
 
 
 class AccessProvider(Protocol):
+    def revoke(self, request: AccessRequest) -> bool:
+        """Remove only this request's stored grant and confirm removal."""
+        ...
+
     def grant(self, request: AccessRequest) -> GrantResult:
         """Perform an already-authorized operation and confirm the outcome."""
         ...
@@ -48,3 +52,13 @@ class MockOkta:
             "SELECT employee_id, application, access_level FROM mock_access "
             "ORDER BY employee_id, application, access_level"
         ).fetchall()
+
+    def revoke(self, request: AccessRequest) -> bool:
+        with self.connection:
+            cursor = self.connection.execute(
+                "DELETE FROM mock_access WHERE employee_id = ? AND application = ? "
+                "AND access_level = ? AND grant_key = ?",
+                (request.requester_slack_id, request.application, request.access_level,
+                 f"{request.request_id}:grant"),
+            )
+        return cursor.rowcount == 1

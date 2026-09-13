@@ -51,11 +51,11 @@ def exception_pending(request):
 
 
 def exception_review(request):
-    """Private mock reviewer message, built from the persisted permanent request."""
+    """Private mock reviewer message, built from the persisted request."""
     return stopped(
         f"<@{request.assigned_approver_id}>: Review the exception for "
         f"<@{request.requester_slack_id}>. Application: {request.application}. "
-        f"Access: {request.access_level}. Duration: Permanent. "
+        f"Access: {request.access_level}. Duration: {request.duration}. "
         f"Business reason: {request.business_reason}. Approve or reject this exception.",
         request.request_id,
     )

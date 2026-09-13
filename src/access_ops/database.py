@@ -1,8 +1,8 @@
-"""Small SQLite store for permanent-access requests and append-style audit."""
+"""Small SQLite store for access requests and append-style audit."""
 import sqlite3
 from datetime import datetime
 
-from .models import AccessRequest, AuditEvent, RequestStatus
+from .models import AccessRequest, AuditEvent, RequestStatus, RevocationStatus
 
 
 class Database:
@@ -25,11 +25,20 @@ class Database:
                 timestamp TEXT NOT NULL, policy_version INTEGER, details TEXT NOT NULL
             );
         """)
-        # Preserve databases created by the preceding auto-approval slice.
+        # Additive migration: preceding slices stored only permanent requests.
         columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(requests)")}
-        if "assigned_approver_id" not in columns:
-            self.connection.execute("ALTER TABLE requests ADD COLUMN assigned_approver_id TEXT")
-            self.connection.commit()
+        additions = {
+            "assigned_approver_id": "TEXT",
+            "duration": "TEXT NOT NULL DEFAULT 'Permanent'",
+            "temporary": "INTEGER NOT NULL DEFAULT 0",
+            "starts_at": "TEXT",
+            "expires_at": "TEXT",
+            "revocation_status": "TEXT NOT NULL DEFAULT 'NOT_APPLICABLE'",
+        }
+        with self.connection:
+            for name, definition in additions.items():
+                if name not in columns:
+                    self.connection.execute(f"ALTER TABLE requests ADD COLUMN {name} {definition}")
 
     def close(self):
         self.connection.close()
@@ -37,11 +46,18 @@ class Database:
     def create(self, request, policy, event):
         with self.connection:
             self.connection.execute(
-                "INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO requests (request_id, requester_slack_id, application, access_level, "
+                "business_reason, created_at, updated_at, status, provisioning_result, policy_id, "
+                "policy_version, assigned_approver_id, duration, temporary, starts_at, expires_at, "
+                "revocation_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (request.request_id, request.requester_slack_id, request.application,
                  request.access_level, request.business_reason, request.created_at.isoformat(),
                  request.updated_at.isoformat(), request.status, request.provisioning_result,
-                 policy.policy_id, policy.policy_version, request.assigned_approver_id),
+                 policy.policy_id, policy.policy_version, request.assigned_approver_id,
+                 request.duration, request.temporary,
+                 request.starts_at.isoformat() if request.starts_at else None,
+                 request.expires_at.isoformat() if request.expires_at else None,
+                 request.revocation_status),
             )
             self.append_event(event)
 
@@ -54,7 +70,10 @@ class Database:
         return AccessRequest(
             request_id=row["request_id"], requester_slack_id=row["requester_slack_id"],
             application=row["application"], access_level=row["access_level"],
-            business_reason=row["business_reason"], temporary=False, expires_at=None,
+            business_reason=row["business_reason"], temporary=bool(row["temporary"]), duration=row["duration"],
+            starts_at=datetime.fromisoformat(row["starts_at"]) if row["starts_at"] else None,
+            expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
+            revocation_status=RevocationStatus(row["revocation_status"]),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
             status=RequestStatus(row["status"]), provisioning_result=row["provisioning_result"],
@@ -72,10 +91,12 @@ class Database:
         with self.connection:
             self.append_event(event)
             self.connection.execute(
-                "UPDATE requests SET status = ?, updated_at = ?, provisioning_result = ? "
-                "WHERE request_id = ?",
+                "UPDATE requests SET status = ?, updated_at = ?, provisioning_result = ?, "
+                "starts_at = ?, expires_at = ?, revocation_status = ? WHERE request_id = ?",
                 (request.status, request.updated_at.isoformat(), request.provisioning_result,
-                 request.request_id),
+                 request.starts_at.isoformat() if request.starts_at else None,
+                 request.expires_at.isoformat() if request.expires_at else None,
+                 request.revocation_status, request.request_id),
             )
 
     def append_event(self, event):
@@ -98,3 +119,11 @@ class Database:
             timestamp=datetime.fromisoformat(row["timestamp"]),
             policy_version=row["policy_version"], details=row["details"],
         ) for row in rows]
+
+    def active_temporary_requests(self):
+        rows = self.connection.execute(
+            "SELECT request_id FROM requests WHERE status = ? AND temporary = 1 "
+            "AND expires_at IS NOT NULL AND revocation_status = ? ORDER BY request_id",
+            (RequestStatus.ACTIVE, RevocationStatus.PENDING),
+        ).fetchall()
+        return [self.get(row["request_id"]) for row in rows]

@@ -1,6 +1,6 @@
-"""UI-independent orchestration for permanent GitHub access and single-reviewer exceptions."""
+"""UI-independent orchestration for GitHub access and single-reviewer exceptions."""
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from .audit import event_for
@@ -8,9 +8,18 @@ from .approvals import manager_for, exception_reviewer_for
 from .config import APPLICATION_ACCESS, Configuration, ConfigurationError
 from .database import Database
 from .integrations.mock_okta import AccessProvider, GrantResult
-from .models import AccessRequest, AuditEvent, ApproverType, Decision, EmployeeStatus, RequestStatus
+from .models import AccessRequest, AuditEvent, ApproverType, Decision, EmployeeStatus, RequestStatus, RevocationStatus
 from .notifications import granted, pending, exception_pending, stopped
 from .policy_engine import match_policy
+
+
+DURATION_DAYS = {"1 day": 1, "7 days": 7, "30 days": 30, "90 days": 90, "Permanent": None}
+
+
+def utc_time(value):
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Current time must be timezone-aware")
+    return value.astimezone(timezone.utc)
 
 
 class IntakeError(ValueError):
@@ -22,10 +31,14 @@ class IntakeError(ValueError):
 
 
 class Workflow:
-    def __init__(self, configuration: Configuration, database: Database, provider: AccessProvider):
+    def __init__(self, configuration: Configuration, database: Database, provider: AccessProvider, clock=None):
         self.configuration = configuration
         self.database = database
         self.provider = provider
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _now(self):
+        return utc_time(self.clock())
 
     def _validate(self, employee_id, application, access_level, business_reason, duration):
         employee = self.configuration.employee(employee_id)
@@ -60,8 +73,14 @@ class Workflow:
                 or (access_level == "Write" and not exception and (policy.decision != Decision.APPROVAL_REQUIRED
                     or policy.approver_type != ApproverType.MANAGER))):
             raise IntakeError("The configured approval path is unsupported. Contact IT; no access was granted.")
-        if duration != "Permanent" or not policy.permanent_allowed:
-            raise IntakeError("This workflow requires policy-permitted Permanent access. Contact IT for other durations.")
+        if duration not in DURATION_DAYS:
+            raise IntakeError("Unsupported duration. Choose 1 day, 7 days, 30 days, 90 days, or Permanent; no access was granted.")
+        days = DURATION_DAYS[duration]
+        if days is None:
+            if not policy.permanent_allowed:
+                raise IntakeError("Permanent access is not allowed by this policy; no access was granted.")
+        elif not policy.temporary_allowed or days > policy.max_duration_days:
+            raise IntakeError("The requested temporary duration is not allowed by this policy; no access was granted.")
         return policy
 
     def submit(self, employee_id, application, access_level, business_reason, duration):
@@ -73,11 +92,14 @@ class Workflow:
             exception = policy.decision == Decision.EXCEPTION_REVIEW
             if exception:
                 reviewer = exception_reviewer_for(self.configuration, employee_id, policy)
-            now = datetime.now(timezone.utc)
+            now = self._now()
             request = AccessRequest(
                 request_id=f"REQ-{uuid4().hex}", requester_slack_id=employee_id,
                 application=application, access_level=access_level, business_reason=business_reason,
-                temporary=False, expires_at=None, created_at=now, updated_at=now,
+                temporary=duration != "Permanent", duration=duration,
+                expires_at=None, created_at=now, updated_at=now,
+                revocation_status=(RevocationStatus.PENDING if duration != "Permanent"
+                                   else RevocationStatus.NOT_APPLICABLE),
                 status=(RequestStatus.EXCEPTION_REVIEW if exception else
                         RequestStatus.PENDING_APPROVAL if policy.decision == Decision.APPROVAL_REQUIRED else RequestStatus.APPROVED),
                 assigned_approver_id=reviewer,
@@ -115,15 +137,15 @@ class Workflow:
             with self.database.connection:
                 self.database.append_event(AuditEvent(
                     request_id=request_id, event_type="INTAKE_STOPPED", actor="access_ops",
-                    previous_status=None, new_status=status, timestamp=datetime.now(timezone.utc),
+                    previous_status=None, new_status=status, timestamp=self._now(),
                     policy_version=None, details=message,
                 ))
         except Exception:
             return stopped("The request could not be recorded safely. Contact IT; no access was granted.")
         return stopped(message, request_id)
 
-    def _record(self, request, event_type, details, actor="access_ops", status=None):
-        updated = replace(request, status=status or request.status, updated_at=datetime.now(timezone.utc))
+    def _record(self, request, event_type, details, actor="access_ops", status=None, now=None):
+        updated = replace(request, status=status or request.status, updated_at=now if now is not None else self._now())
         policy_id, version = self.database.policy_reference(request.request_id)
         self.database.transition(updated, AuditEvent(
             request_id=request.request_id, event_type=event_type, actor=actor,
@@ -199,8 +221,10 @@ class Workflow:
             try:
                 policy = self._validate(
                     request.requester_slack_id, request.application, request.access_level,
-                    request.business_reason, "Permanent",
+                    request.business_reason, request.duration,
                 )
+                if request.temporary != (request.duration != "Permanent"):
+                    raise IntakeError("Stored duration is inconsistent; no access was granted.")
                 if self.database.policy_reference(request_id) != (policy.policy_id, policy.policy_version):
                     raise IntakeError("Policy changed. Contact IT; no provisioning was attempted.")
                 if human:
@@ -219,7 +243,7 @@ class Workflow:
             if human:
                 request = self._record(request, "REVALIDATION_SUCCEEDED", "Current employee, policy, and approval validated.")
             provisioning = replace(request, status=RequestStatus.PROVISIONING,
-                                   updated_at=datetime.now(timezone.utc))
+                                   updated_at=self._now())
             # This transaction MUST commit before entering the provider boundary.
             self.database.transition(provisioning, event_for(
                 provisioning, policy, "PROVISIONING_STARTED", request.status, "Authorized grant attempt."
@@ -229,10 +253,17 @@ class Workflow:
             except Exception:
                 result = GrantResult.FAILED
             confirmed = isinstance(result, GrantResult) and result in (GrantResult.GRANTED, GrantResult.ALREADY_EXISTS)
+            # Existing access cannot establish a new temporary grant or expiry.
+            if request.temporary and result == GrantResult.ALREADY_EXISTS:
+                confirmed = False
+            started = self._now() if confirmed and result == GrantResult.GRANTED else None
             completed = replace(
                 provisioning, status=RequestStatus.ACTIVE if confirmed else RequestStatus.PROVISIONING_FAILED,
+                starts_at=started,
+                expires_at=(started + timedelta(days=DURATION_DAYS[request.duration])
+                            if started is not None and request.temporary else None),
                 provisioning_result=result.value if isinstance(result, GrantResult) else GrantResult.FAILED.value,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=self._now(),
             )
             self.database.transition(completed, event_for(
                 completed, policy, "PROVISIONING_SUCCEEDED" if confirmed else "PROVISIONING_FAILED",
@@ -246,3 +277,36 @@ class Workflow:
         except Exception:
             # Provider may have succeeded before a local completion-write failure.
             return stopped("Processing stopped safely. Contact IT to check the access state; do not resubmit.", request_id)
+
+    def process_expired_access(self, now=None):
+        """Manually expire stored grants; no scheduler or provider retries."""
+        now = utc_time(now) if now is not None else self._now()
+        responses = []
+        for request in self.database.active_temporary_requests():
+            try:
+                if request.expires_at > now:
+                    continue
+                days = DURATION_DAYS.get(request.duration)
+                if (days is None or request.starts_at is None
+                        or request.expires_at != request.starts_at + timedelta(days=days)
+                        or request.provisioning_result != GrantResult.GRANTED
+                        or not any(e.event_type == "PROVISIONING_SUCCEEDED"
+                                   and e.new_status == RequestStatus.ACTIVE
+                                   for e in self.database.events(request.request_id))):
+                    self._record(request, "REVOCATION_BLOCKED", "Stored grant lifecycle is inconsistent.", now=now)
+                    responses.append(stopped("Expiration stopped safely. Contact IT to check the stored grant.", request.request_id))
+                    continue
+                request = self._record(request, "ACCESS_EXPIRED", "Temporary access reached its expiration.",
+                                       status=RequestStatus.EXPIRED, now=now)
+                request = self._record(request, "REVOCATION_STARTED", "Removing the stored request grant.", now=now)
+                if self.provider.revoke(request) is not True:
+                    responses.append(stopped("Removal was not confirmed. Contact IT to check the stored grant.", request.request_id))
+                    continue
+                request = replace(request, revocation_status=RevocationStatus.REVOKED)
+                self._record(request, "REVOCATION_SUCCEEDED", "Provider confirmed removal of the stored grant.",
+                             status=RequestStatus.REVOKED, now=now)
+                responses.append(stopped("Temporary access expired and was removed from the mock directory. "
+                                         "No further action is needed.", request.request_id))
+            except Exception:
+                responses.append(stopped("Expiration stopped safely. Contact IT to check the access state.", request.request_id))
+        return responses
