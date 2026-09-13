@@ -199,6 +199,8 @@ FAQ answers must be grounded in an approved knowledge base, link to their source
 
 ## 8. Application Policy Catalog
 
+### Implemented prototype policy examples
+
 | Application | Access | Eligible users | Decision | Approver |
 |---|---|---|---|---|
 | GitHub | Read | Engineering | Auto-approve | None |
@@ -206,16 +208,12 @@ FAQ answers must be grounded in an approved knowledge base, link to their source
 | GitHub | Admin | Engineering leadership | Approval | IT/Security |
 | Figma | View | Any active employee | Auto-approve | None |
 | Figma | Editor | Product/Design | Auto-approve | None |
-| Figma | Admin | Product/Design leadership | Approval | IT/Security |
 | Notion | Standard | Any active employee | Auto-approve | None |
-| Notion | Admin | Department leadership | Approval | IT/Security |
 | Salesforce | Standard | Sales/Customer Success | Approval | Manager |
-| Salesforce | Admin | Sales Operations leadership | Approval | IT/Security |
 | Snowflake | Read | Data/Engineering | Approval | Manager |
 | Snowflake | Write | Data/Engineering | Approval | Data owner |
-| Snowflake | Admin | Data leadership | Approval | IT/Security |
 
-Policies are stored as editable records rather than application-specific conditional code. Configurable fields include eligible departments/titles, auto-approval behavior, approver role, temporary-access duration, and active status.
+The shipped demo catalog starts with these five applications and the policy rows in `config/access_policies.csv`; GitHub Admin is the only elevated example. Policies are stored as editable records rather than application-specific conditional code. The Day 4 local lifecycle extension can add a catalog entry for demonstration or maintenance, but this does not make the prototype a general-purpose IAM platform.
 
 For the prototype's Product Manager → GitHub Write exception, the exception policy assigns one configured GitHub application owner or IT reviewer. It does not require both a manager and an application owner.
 
@@ -366,39 +364,39 @@ Priority order:
 
 | Metric | Initial target or use |
 |---|---|
-| Time to first response | Under 1 minute |
-| Auto-approved provisioning time | Under 2 minutes |
+| Time to first response | Establish baseline, then set a pilot target |
+| Auto-approved provisioning time | Establish baseline, then set a pilot target |
 | Human approval latency | Establish baseline, then reduce |
-| Automation rate | 50%+ of eligible standard requests |
-| Manual touches | At least 50% reduction |
-| Correct policy-routing rate | 100% in tests; 99%+ production goal |
-| Provisioning success rate | 99%+ production goal |
-| On-time temporary revocation | 100% |
+| Automation rate | Measure the pilot; set target after baseline |
+| Manual touches | Measure the pilot; set target after baseline |
+| Correct policy-routing rate | 100% in deterministic tests; establish production baseline |
+| Provisioning success rate | Measure provider-backed pilot; set target after baseline |
+| On-time temporary revocation | Establish operational baseline |
 | Unauthorized provisioning | Zero |
 | Employee satisfaction | Slack thumbs-up/down or short survey |
 | Weekly IT time saved | Compare with current manual baseline |
 
-Targets are assumptions until stakeholders establish a real baseline.
+These are measurement plans or illustrative pilot targets, not established performance facts. The 24-hour Operations display is a separate illustrative prototype assumption, not a Customer.io SLA.
 
 ## 16. Monitoring and Alerts
 
-The operations dashboard will show:
+The implemented Operations view shows:
 
 - Requests by status
 - Auto-approved versus human-approved requests
 - Requests awaiting approval
-- Average time in each stage
+- Persisted created/updated timestamps and derived age against the illustrative 24-hour demo target
 - Provisioning and revocation failures
-- Temporary access expiring soon
-- Exceptions and escalations
+- Temporary access and follow-up states
+- Exceptions and operational follow-up
 - Recent audit events
 
-Alert IT when:
+The prototype persists mock IT follow-up deliveries for supported manual-review and revocation-failure paths. Automated alerts, reminders, and escalation timers are future-state. In production, alert IT when:
 
 - Provisioning fails after the retry limit.
 - Temporary access cannot be revoked.
 - A request has no valid approver.
-- Approval exceeds its SLA.
+- A stakeholder-defined approval SLA is exceeded (future-state; the prototype has no approval timer).
 - Someone attempts an unauthorized approval.
 - The policy engine cannot find a valid rule.
 - Failure rates exceed an agreed threshold.

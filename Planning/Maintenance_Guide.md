@@ -33,6 +33,8 @@ Only active mocked Operations Directors or IT Security Analysts in Operations ca
 
 The application validates the complete catalog, checks reviewer routing, rejects stale reviews, increments the changed policy version, and records before/after audit history. Direct CSV editing bypasses that audit history and should be avoided for routine changes.
 
+Fixed reviewer assignments are trusted prototype policy configuration. The application verifies that the configured reviewer exists and is active, but does not independently prove organizational application ownership or security authority. Changing a privileged reviewer—especially GitHub Admin’s `IT_SECURITY` reviewer—is a security-sensitive policy change, not cosmetic maintenance. A nontechnical owner should escalate before making that change unless organizational ownership has been confirmed. Production should use authoritative ownership or restricted RBAC data, restricted admin roles, change review or dual control, version history, and rollback.
+
 Policy changes affect future evaluation and revalidation. They do not rewrite historical requests, audit events, or existing grants.
 
 ## Maintain applications
@@ -55,6 +57,12 @@ The removal intent is audited before the mock provider call. Only provider confi
 Only transient provider failures receive immediate bounded retries: at most three provider attempts total. There is no delayed retry queue, sleep, increasing delay, or exponential backoff.
 
 Two identical submissions can create two request records. This is expected in the prototype. The safeguard is the mock provider's stable request operation keys and unique grant identity, which prevent duplicate access grants. Do not rely on request-level deduplication.
+
+## Request aging and SLA visibility
+
+Operations displays persisted request age and a derived single 24-hour demo target. This is read-only visibility, not authorization or enforcement. There are no SLA definitions, timers, reminders, escalation, approval expiration, or historical SLA reports. The target is illustrative and not a Customer.io policy; production targets should be agreed with IT stakeholders after baseline measurement.
+
+Business reasons are visible to reviewers and mock IT workflows. Enter only the minimum operational context. Never include secrets, credentials, API tokens, customer data, or unnecessary personal information. The prototype has no automated classification or redaction; production needs retention, access-control, classification/redaction, and deletion rules.
 
 ## When to escalate
 

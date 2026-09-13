@@ -34,7 +34,7 @@ The prototype will use:
 
 There is no runtime LLM or AI API dependency in the core workflow. Any future AI intake would produce untrusted structured input that must pass the same deterministic validation and authorization boundaries.
 
-## Planned repository structure
+## Current repository structure
 
 ```text
 access-ops/
@@ -69,6 +69,8 @@ access-ops/
 
 This is the intended design. Creating empty source, test, configuration, or entry-point files is outside this documentation task.
 
+The tree above is a compact design map, not a complete file listing. In the current implementation there is no `seed.py`; the relevant operational files are `src/access_ops/administration.py`, `admin_ui.py`, and `ui.py`, and the catalog also includes `config/applications.csv`.
+
 ## Responsibilities and boundaries
 
 | Module or boundary | Responsibility | Boundary |
@@ -83,13 +85,16 @@ This is the intended design. Creating empty source, test, configuration, or entr
 | `database.py` | Persist SQLite request, access, and audit state | Provides durable state used by the workflow |
 | `notifications.py` | Produce Slack-style employee, reviewer, and IT messages | Does not expose secrets, stack traces, or raw provider errors |
 | `integrations/mock_okta.py` | Simulate external grants and removals, including explicit failures | Does not decide whether an action is authorized |
-| `seed.py` | Prepare synthetic demo data and local prototype state | Does not replace workflow validation |
+| `src/access_ops/administration.py` | Validate and audit narrow policy/application ownership actions | Does not replace workflow authorization |
+| `admin_ui.py` | Render local Active Access and Configuration controls | Does not authorize actions itself |
+| `ui.py` | Shared Streamlit presentation helpers | Does not make workflow decisions |
 
 ## Request status model
 
 The workflow uses this intentionally small set of statuses:
 
 ```text
+MANUAL_REVIEW
 NEEDS_INFORMATION
 PENDING_APPROVAL
 EXCEPTION_REVIEW
@@ -115,7 +120,7 @@ The workflow service, rather than Streamlit, controls valid transitions. Every t
 6. The mocked Okta adapter attempts the grant. A confirmed grant moves the request to `ACTIVE`; a simulated or actual adapter failure moves it to `PROVISIONING_FAILED` while preserving valid approval and audit context.
 7. Temporary active access moves to `EXPIRED` when its end time is reached. The expiration processor requests deterministic removal through the same integration boundary. Successful removal moves to `REVOKED`; an unsuccessful removal moves to `REVOCATION_FAILED` and alerts IT.
 
-Repeated submissions and processing use stable request/access identifiers and must return the existing result without duplicate provisioning. Failure states are explicit and auditable rather than silently swallowed.
+Duplicate submissions may create separate request records. Provider idempotency and unique grant identity prevent duplicate access grants; request-level submission deduplication is not implemented. Failure states are explicit and auditable rather than silently swallowed.
 
 ## Synthetic demo employees
 
@@ -196,7 +201,11 @@ The implementation does not include:
 - LLM/API calls in the core workflow
 - Multi-approver workflows
 
-These exclusions preserve the existing scope and architecture decisions. Additional exclusions in the locked planning documents remain in force.
+These exclusions preserve the core scope. The Day 4 amendment superseded the earlier exclusion of local policy administration and access removal unrelated to temporary expiration; those narrow ownership features are implemented. Production authentication, authoritative reviewer ownership, lifecycle automation, and generalized IAM remain future-state.
+
+## Derived SLA visibility
+
+The Operations view derives request age from persisted `created_at` timestamps and displays one illustrative `DEMO_SLA_HOURS = 24` target. It is read-only presentation metadata: it does not change request state or participate in authorization, approval, provisioning, retry, expiration, or revocation. There are no SLA timers, reminders, escalations, approval TTLs, business-hours calculations, or historical SLA reports.
 
 ## Application lifecycle
 
