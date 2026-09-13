@@ -1,5 +1,19 @@
 \# Customer.io Access Ops - Implementation Contract
 
+## Human-authorized Day 4 extension — September 13, 2026
+
+This amendment supersedes earlier exclusions of local policy administration and access removal unrelated to expiration. Branden explicitly authorized these focused ownership features; the five-application catalog, deterministic workflow, single-reviewer constraint, and mock integration boundaries remain.
+
+- IT Operations contains Operations, Active Access, and Configuration. Remove architecture/process-step guides from application pages; retain three primary experiences, concise scenario prefills, and operational results.
+- Assigned, active reviewers may reject either normal pending approvals or configured exceptions with a human-entered, trimmed nonempty reason. Preserve authorization, self-review and request-state checks. Record reason, reviewer, timestamp and rejected outcome in the existing request audit history; retain the original request.
+- Active Access reads current grants from the existing provider SQLite `mock_access` table, joined through its grant key to the originating workflow request. Approval history is not current access. Failed or overdue removal remains visible while the grant exists.
+- Active mocked Operations Directors and IT Security Analysts in the Operations department act as prototype process owners. Backend checks this narrow role for policy saves and manual removal. Selecting an identity is not production authentication.
+- Manual removal requires an explicit confirmation and trimmed nonempty human reason, verifies the exact source grant and recorded lifecycle, audits intent before the provider call, and uses existing request-specific mock revocation and bounded retries. Only provider confirmation permits REVOKED; failure retains the actual grant and auditable failure/reason. Historical request/audit records are never deleted.
+- Configuration edits update existing policy rows only. Policy ID, application/access identity and automatic version are not user editable. Supported fields: department/title eligibility, decision, approver type/fixed reviewer, temporary/permanent permissions, maximum days, enabled state. No employee editing, new reviewer accounts, arbitrary SQL/JSON, bulk import, policy creation/deletion, rollback UI or AI policy generation.
+- Edit → validate/review changes → explicit save. Validate the entire candidate catalog using the startup loader plus administrative checks for known selectors and valid exception/manager routing. Reject malformed, conflicting, stale or unauthorized changes. Increment the changed policy version automatically; persist to the existing CSV via a staged atomic file replacement.
+- Append configuration audit records with actor, UTC time, policy, before/after values and intent/outcome. A durable intent must exist before replacement. CSV and SQLite are separate stores; an interrupted completion can require manual reconciliation and must not be reported as confirmed success.
+- New policy versions affect future evaluation and revalidation of pending requests. They do not rewrite historical policy references, decisions, audit events or existing grants. No AI approves any configuration or access action.
+
 
 
 \*\*Status:\*\* Locked for Day 3 implementation
@@ -382,3 +396,7 @@ Prefer a small implementation that satisfies these behaviors over additional fea
 
 
 
+
+## Human-authorized application lifecycle refinement � September 13, 2026
+
+Branden authorized non-technical application onboarding and application soft disable/re-enable in IT Operations. Applications are retained in a validated `applications.csv` catalog with an enabled flag; policies remain separate configuration rows. Hard deletion is excluded: history, audit references and active grants remain readable. Disabling stops new requests only and never revokes existing access. Creation, disable and re-enable use deterministic validation, mocked owner authorization, review/save confirmation and the existing configuration audit history. Production would add authenticated RBAC and stronger change approval.

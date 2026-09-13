@@ -1,5 +1,15 @@
 # AI Usage Log
 
+## Day 4 extension — human override / refinement
+
+- **Tool:** Codex / GPT-6.
+- **Task:** Implemented human-requested operational ownership improvements: structured configuration administration, SQLite-backed current access, rejection reasons, manual removal reasons and confirmation, and UI simplification.
+- **Important human decision:** Branden explicitly chose to remove explanatory workflow-step UI after reviewing the first Day 4 version because architecture documentation already covers those details. He chose to spend interface complexity on demo paths, configuration ownership, active-access management and auditable human rejection/removal reasons. This is human prioritization, not an AI-generated design decision or an invented disagreement.
+- **Useful result:** The interface now centers on requests, review and IT ownership. Services enforce reason/identity/state checks; current access comes from existing provider grants, and policy saves use deterministic whole-catalog validation and before/after audit records.
+- **Limitations:** Administrative identity is mocked. CSV and SQLite are separate stores; completion-audit errors require investigation. The prototype assumes serial local use, and config revisions do not provide concurrent-writer locking. Browser checks use temporary local tooling because the integrated browser was unavailable.
+- **Branden review/modification:** These changes implement Branden's explicit refinement of the earlier AI-assisted design. Branden retains final product and code-review judgment; no AI disagreement is manufactured here.
+- **Final decision:** AI assists implementation and review only. No LLM authorizes, approves, rejects, provisions, revokes or creates policy in the running application.
+
 This is a draft disclosure of AI development-tool assistance for the Customer.io take-home assignment. Codex assisted development; the implemented prototype has no runtime AI dependency.
 
 The tasks below are summaries, not verbatim prompts. Repository commits establish the work and changes, but do not establish which lines Codex generated or which edits Branden personally made. **Branden review required:** confirm the Codex attribution and personal review details for the implementation rows before submitting. The policy disagreement is based on Branden's account supplied for this log and is also recorded in `Blueprint.md`; the original conversation is not available in the repository evidence reviewed.
@@ -39,3 +49,13 @@ Evidence used: [scope and decisions](Overall_Scope_and_Decisions.md), [Blueprint
 ## Human ownership
 
 Codex accelerated implementation, but I retained responsibility for scope, architecture choice, the authorization model, policy semantics, acceptance criteria, testing, and deciding which AI suggestions to accept or reject. I am responsible for reviewing the implementation and this disclosure before submission.
+
+## Day 4 — UI polish and visual review
+
+| Tool | Task | Useful result | Limitations | Branden review / modification | Final decision |
+| --- | --- | --- | --- | --- | --- |
+| Codex / GPT-6 Astra | Multi-agent UI redesign and visual-review pass across Employee, Approver, and IT Operations screens. | A shared Streamlit visual system, concise demo guides, safe scenario prefills, honest mock boundaries, clearer reviewer context, and an operations console that highlights manual review, provisioning failure, revocation failure, and audit detail. Five rounds used actual local screenshots of all three screens. | Visual scores are subjective advisory assessments. The integrated browser was unavailable, so temporary local Playwright tooling outside the repository captured and inspected the screenshots. Reviewers disagreed modestly on scores and did not reach the aspirational 98 composite target. Several suggestions were rejected because they would alter frozen workflow behavior or add unnecessary complexity. | Branden retains final quality judgment and may modify any AI-generated presentation, copy, score, or documentation. | Business logic remained deterministic and frozen. AI improved presentation and critique only; it did not authorize access, approve requests, provision/revoke access, or make policy decisions. |
+
+## Day 4 application lifecycle refinement
+
+**Tool:** Codex / GPT-6. **Human decision:** Branden chose application soft-disable/re-enable over delete to preserve auditability and avoid hidden revocation side effects. Work adds deterministic local application onboarding/lifecycle controls; no AI authorizes, creates policy silently, provisions, or revokes access.

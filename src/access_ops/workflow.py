@@ -4,8 +4,9 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from .audit import event_for
+from .administration import require_owner
 from .approvals import reviewer_for, exception_reviewer_for
-from .config import APPLICATION_ACCESS, Configuration, ConfigurationError
+from .config import Configuration, ConfigurationError, SUPPORTED_ACCESS_LEVELS
 from .database import Database
 from .integrations.mock_okta import AccessProvider, GrantResult, TransientProviderError, operation_id
 from .models import AccessRequest, AuditEvent, ApproverType, Decision, EmployeeStatus, RequestStatus, RevocationStatus
@@ -54,10 +55,16 @@ class Workflow:
         if any(not isinstance(value, str) or not value.strip()
                for value in (application, access_level, business_reason, duration)):
             raise IntakeError("Provide application, access level, business reason, and duration, then submit again. No access was granted.", RequestStatus.NEEDS_INFORMATION)
-        if application not in APPLICATION_ACCESS:
+        catalog = self.configuration.application_access
+        application_record = self.configuration.application(application)
+        if application not in catalog:
             raise IntakeError("The requested application is unsupported. Choose an application from the catalog or contact IT; no access was granted.")
-        if access_level not in APPLICATION_ACCESS[application]:
+        if access_level not in catalog[application]:
+            if access_level in SUPPORTED_ACCESS_LEVELS:
+                raise IntakeError("No enabled policy supports this configured application/access level. Contact IT for configuration correction; no access was granted.", RequestStatus.REJECTED)
             raise IntakeError(f"The requested access level is unsupported for {application}. Choose a listed access level or contact IT; no access was granted.")
+        if application_record is None or not application_record.enabled:
+            raise IntakeError("This application is currently disabled for new requests. Contact IT; no access was granted.")
         if duration not in DURATION_DAYS:
             raise IntakeError("Unsupported duration. Choose 1 day, 7 days, 30 days, 90 days, or Permanent; no access was granted.")
         policy = match_policy(self.configuration, employee_id, application, access_level)
@@ -176,11 +183,11 @@ class Workflow:
         """Reviewer identity is supplied by trusted local demo code, like intake identity."""
         return self._review(request_id, reviewer_id)
 
-    def reject(self, request_id, reviewer_id):
-        """Reject a pending exception using the same reviewer authorization checks."""
-        return self._review(request_id, reviewer_id, reject=True)
+    def reject(self, request_id, reviewer_id, reason=""):
+        """Reject a pending request only with reviewer authority and a human reason."""
+        return self._review(request_id, reviewer_id, reject=True, reason=reason)
 
-    def _review(self, request_id, reviewer_id, reject=False):
+    def _review(self, request_id, reviewer_id, reject=False, reason=""):
         try:
             request = self.database.get(request_id)
             if request is None:
@@ -197,9 +204,14 @@ class Workflow:
                 if policy is not None:
                     current_reviewer = exception_reviewer_for(
                         self.configuration, request.requester_slack_id, policy)
+            elif reject:
+                saved_id, _ = self.database.policy_reference(request_id)
+                policy = next((p for p in self.configuration.policies if p.policy_id == saved_id and p.enabled), None)
+                if policy is not None:
+                    current_reviewer = reviewer_for(self.configuration, request.requester_slack_id, policy)
             if (request.status not in (RequestStatus.PENDING_APPROVAL, RequestStatus.EXCEPTION_REVIEW)
-                    or (reject and not exception)
                     or (exception and current_reviewer != reviewer_id)
+                    or (reject and current_reviewer != reviewer_id)
                     or reviewer_id == request.requester_slack_id
                     or not request.assigned_approver_id
                     or reviewer_id != request.assigned_approver_id
@@ -208,9 +220,14 @@ class Workflow:
                 return stopped("Approval rejected. Only the assigned reviewer may decide a pending request; "
                                "self-approval is prohibited. No access was granted by this attempt.", request_id)
             if reject:
-                self._record(request, "EXCEPTION_REJECTED", "Assigned reviewer rejected the exception.",
+                if not isinstance(reason, str) or not reason.strip():
+                    self._record(request, "REJECTION_REASON_REQUIRED", "A nonempty rejection reason is required.", reviewer_id)
+                    return stopped("Enter a rejection reason; the request remains pending.", request_id)
+                reason = reason.strip()
+                self._record(request, "EXCEPTION_REJECTED" if exception else "REQUEST_REJECTED",
+                             f"Assigned reviewer rejected the request. Reason: {reason}",
                              reviewer_id, RequestStatus.REJECTED)
-                return stopped("Your exception request was rejected by the assigned reviewer. "
+                return stopped(f"Your request was rejected by the assigned reviewer. Reason: {reason}. "
                                "No access was granted. Contact IT for further guidance.", request_id)
             self._record(request, "EXCEPTION_APPROVED" if exception else "REQUEST_APPROVED",
                          "Assigned reviewer approved the exception." if exception else
@@ -325,6 +342,59 @@ class Workflow:
         except Exception:
             # Provider may have succeeded before a local completion-write failure.
             return stopped("Processing stopped safely. Contact IT to check the access state; do not resubmit.", request_id)
+
+    def active_access(self):
+        """Provider SQLite is authoritative; enrich exact source grants with history."""
+        rows = []
+        for grant in self.provider.current_grants():
+            request_id = grant["grant_key"].removesuffix(":grant")
+            request = self.database.get(request_id)
+            matches = (request is not None and grant["grant_key"] == operation_id(request, "grant")
+                       and (grant["employee_id"], grant["application"], grant["access_level"]) ==
+                       (request.requester_slack_id, request.application, request.access_level))
+            rows.append(dict(grant, request_id=request_id, request=request if matches else None))
+        return rows
+
+    def remove_access(self, request_id, actor, reason, *, confirmed=False):
+        """Explicit manual removal of an owned grant, with pre-action reason audit."""
+        try:
+            request = self.database.get(request_id)
+            if request is None:
+                return stopped("Source request not found. Contact IT to reconcile the grant.", request_id)
+            try:
+                require_owner(self.configuration, actor)
+                if confirmed is not True:
+                    raise ValueError("Confirm removal before continuing.")
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ValueError("Enter a removal reason.")
+                grant = next((g for g in self.active_access() if g["request_id"] == request_id and g["request"]), None)
+                if (grant is None or request.status not in (RequestStatus.ACTIVE, RequestStatus.EXPIRED, RequestStatus.REVOCATION_FAILED)
+                        or request.provisioning_result != GrantResult.GRANTED or request.starts_at is None
+                        or not any(e.event_type == "PROVISIONING_SUCCEEDED" and e.new_status == RequestStatus.ACTIVE
+                                   for e in self.database.events(request_id))):
+                    raise ValueError("No removable source grant in a valid state. Refresh or contact IT to reconcile access.")
+                if request.temporary and (request.duration not in DURATION_DAYS or DURATION_DAYS[request.duration] is None
+                        or request.expires_at != request.starts_at + timedelta(days=DURATION_DAYS[request.duration])):
+                    raise ValueError("Stored temporary grant is inconsistent. Contact IT.")
+            except ValueError as error:
+                self._record(request, "MANUAL_REVOCATION_BLOCKED", str(error), actor)
+                return stopped(str(error), request_id)
+            request = replace(request, revocation_status=RevocationStatus.PENDING)
+            request = self._record(request, "MANUAL_REVOCATION_STARTED",
+                                   f"Manual removal requested. Reason: {reason.strip()}. Operation {operation_id(request, 'revoke')}.", actor)
+            removed, attempt = self._provider_operation(request, "revoke")
+            if removed is not True:
+                self._record(request, "REVOCATION_FAILED", f"Manual removal not confirmed. Reason: {reason.strip()}. Attempt {attempt}.",
+                             actor, RequestStatus.REVOCATION_FAILED)
+                response = stopped("Removal failed; removal was not confirmed and access may remain. The reason and outcome were recorded. Verify Active Access and contact IT.", request_id)
+                self.notifications.send(self.configuration.it_operations_recipient, response)
+                return response
+            request = replace(request, revocation_status=RevocationStatus.REVOKED)
+            self._record(request, "REVOCATION_SUCCEEDED", f"Manual removal confirmed. Reason: {reason.strip()}. Attempt {attempt}.",
+                         actor, RequestStatus.REVOKED)
+            return stopped("Access removed from the mock directory. The reason and outcome were recorded.", request_id)
+        except Exception:
+            return stopped("Removal stopped safely. Contact IT to verify access and audit state before retrying.", request_id)
 
     def process_expired_access(self, now=None):
         """Manually expire stored grants with bounded transient provider retries."""

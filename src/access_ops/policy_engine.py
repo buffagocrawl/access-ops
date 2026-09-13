@@ -13,6 +13,9 @@ def match_policy(
     employee = configuration.employee(requester_slack_id)
     if employee is None or employee.status != EmployeeStatus.ACTIVE:
         raise ValueError("Policy matching requires a known, active employee")
+    application_record = configuration.application(application)
+    if application_record is None or not application_record.enabled:
+        return None
     matches = [
         p for p in configuration.policies
         if p.enabled and p.application == application and p.access_level == access_level
